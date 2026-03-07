@@ -1,0 +1,18 @@
+{{define "StartPage"}}
+    {{- /*gotype: ProgressTracker.BasePage*/ -}}
+    <!DOCTYPE html>
+    <html lang="en">
+        {{template "header" .Title}}
+        <body id="page-body">
+            <div class="wrapper" style="margin-top: 1rem;">
+                <a class="button-link" href="/view">View Entries</a>
+                <a class="button-link" href="/create">Create Category</a>
+                <a class="button-link" href="/edit">Edit Category</a>
+                <a class="button-link" href="/delete">Delete Category</a>
+                {{range $name := .SubPages}}
+                    <a class="button-link" href="/edit?category={{urlquery $name}}">Edit Entries for {{$name}}</a>
+                {{end}}
+            </div>
+        </body>
+    </html>
+{{end}}
