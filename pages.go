@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"strings"
 )
 
 //go:embed pages/*
@@ -26,7 +27,7 @@ type BasePage struct {
 
 func getStartPage(writer http.ResponseWriter, _ *http.Request) {
 	var err error
-	page := BasePage{Title: "Overview"}
+	page := BasePage{Title: "Homepage"}
 	page.SubPages, err = getCategoryNames()
 	if err != nil {
 		log.Println(err)
@@ -35,6 +36,28 @@ func getStartPage(writer http.ResponseWriter, _ *http.Request) {
 	}
 
 	err = templateFile.ExecuteTemplate(writer, "StartPage", page)
+	if err != nil {
+		log.Println(err)
+		writer.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+type OverviewPage struct {
+	Title     string
+	Overviews []Overview
+}
+
+func getOverviewPage(writer http.ResponseWriter, request *http.Request) {
+	var err error
+	page := OverviewPage{Title: "Overview"}
+	page.Overviews, err = getOverview(strings.TrimSpace(request.URL.Query().Get("category")))
+	if err != nil {
+		log.Println(err)
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = templateFile.ExecuteTemplate(writer, "OverviewPage", page)
 	if err != nil {
 		log.Println(err)
 		writer.WriteHeader(http.StatusInternalServerError)
