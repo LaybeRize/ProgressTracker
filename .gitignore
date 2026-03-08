@@ -1,4 +1,4 @@
 data.sqlite
-go.sum
-main-res.syso
 .idea
+.venv
+*.exe
