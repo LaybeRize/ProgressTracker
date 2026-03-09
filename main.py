@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import re
 import sqlite3
 from tkinter import *
@@ -57,6 +58,8 @@ class ScrollableFrame(Frame):
 
         # Mousewheel scrolling
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
 
     def _on_frame_configure(self, event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -66,6 +69,12 @@ class ScrollableFrame(Frame):
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux_up(self, _):
+        self.canvas.yview_scroll(-1, "units")
+
+    def _on_mousewheel_linux_down(self, _):
+        self.canvas.yview_scroll(1, "units")
 
 
 class SimpleTable(Frame):
@@ -172,9 +181,21 @@ def db_name(display_name: str) -> str:
     return find_non_letters.sub("", display_name)
 
 
-con = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
 sqlite3.register_adapter(bool, int)
 sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
+con = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
+database_on_disk = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
+with database_on_disk:
+    database_on_disk.backup(con)
+
+def update_disk_db(close: bool = True):
+    with con:
+        con.backup(database_on_disk)
+    if close:
+        con.close()
+        database_on_disk.close()
+
+atexit.register(update_disk_db)
 
 
 class Category:
@@ -270,49 +291,20 @@ class Category:
 class CategoryCreator:
     def __init__(self, base:BaseInterface):
         self.base = base
+        base.master.withdraw()
         self.STRING: Final[str] = "TEXT"
         self.INTEGER: Final[str] = "INTEGER"
         self.BOOLEAN: Final[str] = "BOOLEAN"
         self.options = [self.STRING, self.INTEGER, self.BOOLEAN]
 
         self.master = Toplevel()
+        self.master.protocol("WM_DELETE_WINDOW", self.destroy)
         self.master.title("Create Category")
         self.master.minsize(550, 400)
         self.master.focus_force()
 
-        outer = Frame(self.master)
-
-        canvas = Canvas(outer)
-        scrollbar = Scrollbar(outer, orient="vertical", command=canvas.yview)
-
-        self.scroll_frame = Frame(canvas)
-
-        self.scroll_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def on_mousewheel_linux_up(_):
-            canvas.yview_scroll(-1, "units")
-
-        def on_mousewheel_linux_down(_):
-            canvas.yview_scroll(1, "units")
-
-        self.scroll_frame.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", on_mousewheel))
-        self.scroll_frame.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-
-        canvas.bind_all("<Button-4>", on_mousewheel_linux_up)
-        canvas.bind_all("<Button-5>", on_mousewheel_linux_down)
+        outer = ScrollableFrame(self.master)
+        self.scroll_frame = outer.inner
 
         self.groups = []
         self.add_group()
@@ -329,6 +321,10 @@ class CategoryCreator:
 
         Button(controls, text="Add Group", command=self.add_group).pack(side="left")
         Button(controls, text="Create Category", command=self.create_category).pack(side="left", padx=10)
+
+    def destroy(self):
+        self.base.master.deiconify()
+        self.master.destroy()
 
     def refresh_layout(self):
         """Repack groups based on their order in the list."""
@@ -437,12 +433,16 @@ class CategoryCreator:
         show_info("Successfully added Category")
 
 class EntryAdder:
-    def __init__(self, category: Category):
+    def __init__(self,base: BaseInterface, category: Category):
+        self.base = base
+        base.master.withdraw()
+
         self.STRING: Final[str] = "TEXT"
         self.INTEGER: Final[str] = "INTEGER"
         self.BOOLEAN: Final[str] = "BOOLEAN"
 
         self.master = Toplevel()
+        self.master.protocol("WM_DELETE_WINDOW", self.destroy)
         self.master.title("Create Entry into " + category.display_name)
         self.master.minsize(550, 400)
         self.master.focus_force()
@@ -483,6 +483,10 @@ class EntryAdder:
         Button(self.master, text='Add Entry', command=self.add_to_db).grid(row=pos, column=0, pady=5)
         Button(self.master, text='Reset Entries', command=self.reset).grid(row=pos, column=1)
 
+    def destroy(self):
+        self.base.master.deiconify()
+        self.master.destroy()
+
     def add_to_db(self):
         values = [e.get() for e in self.elements]
         values = [e if type(e) is not str else e.strip() for e in values]
@@ -500,9 +504,13 @@ class EntryAdder:
             element.set(self.default_values[i])
 
 class TableView:
-    def __init__(self, category: Category):
+    def __init__(self, base: BaseInterface, category: Category):
+        self.base = base
+        base.master.withdraw()
+
         self.category = category
         self.master = Toplevel()
+        self.master.protocol("WM_DELETE_WINDOW", self.destroy)
         self.master.title("View " + category.display_name)
         self.master.minsize(550, 400)
         self.master.focus_force()
@@ -549,6 +557,10 @@ class TableView:
         h = frame.winfo_height()
         self.master.geometry(f"{frame.winfo_width() + 40}x{h if h < 1000 else 1000}")
 
+    def destroy(self):
+        self.base.master.deiconify()
+        self.master.destroy()
+
 
 class BaseInterface:
     def __init__(self):
@@ -570,8 +582,8 @@ class BaseInterface:
             CategoryCreator(self)
 
         # Todo: hide main window when opening a subwindow and showing it again after the subwindow has been closed
-        EntryAdder(self.categories[1])
-        TableView(self.categories[1])
+        # EntryAdder(self, self.categories[1])
+        # TableView(self, self.categories[1])
 
         Button(self.master, text='Create New Category', command=create_category).grid(row=0, column=0)
 
