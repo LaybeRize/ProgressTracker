@@ -1,6 +1,6 @@
 # Progress Tracker
 
-Progress Tracker is a small python project, that compiles to one single binary, if desired, allowing the user to move and execute it everywhere.  
+Progress Tracker is a small python (3.11) project, that compiles to one single binary, if desired, allowing the user to move and execute it everywhere.  
 The executive starts up a window where the user can then enter his data, which is saved to the corresponding `data.sqlite` file - which is always in the same folder as the binary.
 
 ## Features

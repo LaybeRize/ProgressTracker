@@ -4,29 +4,112 @@ import re
 import sqlite3
 from tkinter import *
 import tkinter.font as tk_font
+import tkinter.messagebox
+from typing import Final, Callable
+from tkinter.scrolledtext import ScrolledText as TKScrollText
+from functools import partial
+
+
+def show_error(msg: str):
+    tkinter.messagebox.showerror("Error", msg)
+
+
+def show_info(msg: str):
+    tkinter.messagebox.showinfo("Info", msg)
+
+
+class ScrollText:
+    def __init__(self, text: TKScrollText):
+        self.text = text
+
+    def get(self) -> str:
+        return self.text.get("1.0", END)
+
+    def set(self, value: str):
+        self.text.replace("1.0", END, value)
+
+
+class ScrollableFrame(Frame):
+    def __init__(self, parent, max_height=400, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+
+        self.canvas = Canvas(self, highlightthickness=0, height=max_height)
+        self.scrollbar = Scrollbar(self, orient="vertical", command=self.canvas.yview)
+
+        self.inner = Frame(self.canvas)
+
+        self.window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.inner,
+            anchor="nw"
+        )
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        # Update scrollregion when content changes
+        self.inner.bind("<Configure>", self._on_frame_configure)
+
+        # Make inner frame width follow canvas width
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Mousewheel scrolling
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_frame_configure(self, event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.window_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
 
 class SimpleTable(Frame):
-    def __init__(self, parent, rows=10, columns=2):
+    def __init__(self, parent, data: list[list[str]], incrementer: list[bool],
+                 func: Callable[[int, int, bool, tkinter.Label], None], **kwargs):
         # use black background so it "peeks through" to
         # form grid lines
-        Frame.__init__(self, parent, background="black")
+        Frame.__init__(self, parent, background="black", **kwargs)
         self._widgets = []
-        for row in range(rows):
+        for row in range(len(data)):
             current_row = []
-            for column in range(columns):
-                label = Label(self, text="%s/%s" % (row, column),
-                              borderwidth=0,
-                              bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
-                              width="20", wraplength="250", justify="left")
-                label.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
-                current_row.append(label)
+            for column in range(len(incrementer)):
+                if incrementer[column] and row != 0:
+                    sub_frame = Frame(self, background="lightblue" if row == 0 else
+                                            ("white" if row % 2 == 1 else "light gray"), width="20")
+                    label = Label(sub_frame, text=data[row][column],
+                                  borderwidth=0,
+                                  bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
+                                  wraplength="250", justify="left")
+                    label.grid(row=0, column=1, rowspan=2, padx=1)
+                    loc_row = row - 1
+                    loc_col = column
+                    Button(sub_frame, text="↑",
+                           command=partial(func,loc_row, loc_col, True, label)) \
+                        .grid(row=0, column=0)
+                    Button(sub_frame, text="↓",
+                           command=partial(func, loc_row, loc_col, False, label)) \
+                        .grid(row=1, column=0)
+                    sub_frame.grid_columnconfigure(0, weight=0, minsize=30)
+                    sub_frame.grid_columnconfigure(1, weight=1, minsize=250)
+                    sub_frame.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                else:
+                    label = Label(self, text=data[row][column],
+                                  borderwidth=0,
+                                  bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
+                                  wraplength="250", justify="left")
+                    label.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                    current_row.append(label)
             self._widgets.append(current_row)
 
-        for column in range(columns):
-            self.grid_columnconfigure(column, weight=1)
+        for i, column in enumerate(incrementer):
+            self.grid_columnconfigure(i, weight=1, minsize=280 if column else 250)
 
-
-    def set(self, row, column, value):
+    def set(self, row, column, value) -> None:
         widget = self._widgets[row][column]
         widget.configure(text=value)
 
@@ -60,7 +143,7 @@ class NumberEntry(Entry):
         if int_string.count('.') == 0 or int_string.endswith("."):
             return int(int_string.removesuffix(".")) * (10 ** self.decimal_digits)
         front, back = int_string.split(".")
-        back += "0" * (len(back) - self.decimal_digits)
+        back += "0" * (self.decimal_digits - len(back))
         return int(front + back)
 
 def format_number(value: int | None, decimal_digits: int) -> str:
@@ -72,7 +155,9 @@ def format_number(value: int | None, decimal_digits: int) -> str:
     base_string = ((decimal_digits - len(base_string) + 1) * "0") + base_string
     return base_string[:-decimal_digits] + "." + base_string[-decimal_digits:]
 
-def trim_after_format(value: int, decimal_digits: int) -> str:
+def format_number_trim(value: int, decimal_digits: int) -> str:
+    if decimal_digits < 1:
+        return str(value)
     base_string = format_number(value, decimal_digits)
     base_string = base_string.rstrip("0")
     return base_string.rstrip(".")
@@ -87,7 +172,7 @@ def db_name(display_name: str) -> str:
     return find_non_letters.sub("", display_name)
 
 
-con = sqlite3.connect("data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
+con = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
 sqlite3.register_adapter(bool, int)
 sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
 
@@ -98,8 +183,12 @@ class Category:
         self.db_name: str = ""
         self.display_name: str = ""
         self.column_text: str = ""
-        # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer)
-        self.columns: dict[str, tuple[str, bool, str, int, bool]] = {}
+
+        self.STRING: Final[str] = "TEXT"
+        self.INTEGER: Final[str] = "INTEGER"
+        self.BOOLEAN: Final[str] = "BOOLEAN"
+        # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer, TextArea)
+        self.columns: dict[str, tuple[str, bool, str, int, bool, bool]] = {}
 
     @classmethod
     def load_categories_from_db(cls) -> list[Category]:
@@ -138,18 +227,53 @@ class Category:
 
     def _try_create_table(self):
         tab_creator = f"CREATE TABLE {self.db_name} (" + \
-                      ", ".join([f"{key} {val[2]}" for key, val in self.columns.items()]) + ", PRIMARY KEY ("
+                      ", ".join([f"{key} {val}" for key, (_, _, val, *_) in self.columns.items()]) + ", PRIMARY KEY ("
         for key, val in self.columns.items():
             _, prim, *_ = val
             if prim:
                 tab_creator += key + ", "
         return tab_creator.removesuffix(", ") + "));"
 
+    def get_full_update_clause(self) -> str:
+        return f"UPDATE {self.db_name} SET " + \
+            ", ".join([f"{key} = ?" for key in self.columns.keys()]) + " WHERE " + \
+            " AND ".join([f"{key} = ?" for key in self.columns.keys()]) + ";"
+
+    def get_partial_update(self, row_data: list, new_value, position: int) -> tuple[str, list]:
+        update_clause = f"UPDATE {self.db_name} SET {list(self.columns.keys())[position]} = ? WHERE "
+        prim_key = [(key, pos) for pos, (key, (_, val, *_)) in enumerate(self.columns.items()) if val]
+        values = [new_value] + [row_data[pos] for _, pos in prim_key]
+        return update_clause + " AND ".join([f"{key} = ?" for key, _ in prim_key]) + ";", values
+
+    def transform_values(self, data: list) -> list[str]:
+        temp_col = list(self.columns.values())
+        res: list[str] = []
+        for i, val in enumerate(data):
+            _, _, col_type, dec_digit, *_ = temp_col[i]
+
+            if col_type == self.STRING:
+                res.append(val)
+            elif col_type == self.BOOLEAN:
+                if val:
+                    res.append("✅")
+                else:
+                    res.append("❌")
+            elif col_type == self.INTEGER:
+                if val is None:
+                    res.append("")
+                else:
+                    res.append(format_number_trim(val, dec_digit))
+
+        return res
+
 
 class CategoryCreator:
     def __init__(self, base:BaseInterface):
         self.base = base
-        self.options = ["TEXT", "INTEGER", "BOOLEAN"]
+        self.STRING: Final[str] = "TEXT"
+        self.INTEGER: Final[str] = "INTEGER"
+        self.BOOLEAN: Final[str] = "BOOLEAN"
+        self.options = [self.STRING, self.INTEGER, self.BOOLEAN]
 
         self.master = Toplevel()
         self.master.title("Create Category")
@@ -238,6 +362,8 @@ class CategoryCreator:
         type_entry = OptionMenu(frame, type_var,*self.options)
         primary_key_var = BooleanVar(frame, value=False)
         primary_key = Checkbutton(frame, variable=primary_key_var)
+        text_area_var = BooleanVar(frame, value=False)
+        text_area = Checkbutton(frame, variable=text_area_var)
         incrementer_var = BooleanVar(frame, value=False)
         incrementer = Checkbutton(frame, variable=incrementer_var)
         decimal_digits = NumberEntry(frame)
@@ -252,25 +378,29 @@ class CategoryCreator:
         Label(frame, text="Primary Key:").grid(row=2, column=0, sticky=W)
         primary_key.grid(row=2, column=1, sticky=W)
 
-        Label(frame, text="Incrementer:").grid(row=3, column=0, sticky=W)
-        incrementer.grid(row=3, column=1, sticky=W)
+        Label(frame, text="Enable Textarea:").grid(row=3, column=0, sticky=W)
+        text_area.grid(row=3, column=1, sticky=W)
 
-        Label(frame, text="Decimal Digits:").grid(row=4, column=0, sticky=W)
-        decimal_digits.grid(row=4, column=1, sticky=W)
+        Label(frame, text="Incrementer:").grid(row=4, column=0, sticky=W)
+        incrementer.grid(row=4, column=1, sticky=W)
+
+        Label(frame, text="Decimal Digits:").grid(row=5, column=0, sticky=W)
+        decimal_digits.grid(row=5, column=1, sticky=W)
 
         group = {
             "frame": frame,
             "name": name_entry,
             "type": type_var,
             "is_key": primary_key_var,
+            "text_area": text_area_var,
             "incrementer": incrementer_var,
             "decimal_digits": decimal_digits,
         }
 
         Button(frame, text="↑", command=lambda: self.move_up(group)).grid(row=0, column=2, padx=10)
-        Button(frame, text="↓", command=lambda: self.move_down(group)).grid(row=4, column=2, padx=10)
+        Button(frame, text="↓", command=lambda: self.move_down(group)).grid(row=5, column=2, padx=10)
 
-        Button(frame, text="Delete", command=lambda: self.delete_group(group)).grid(row=4, column=3, padx=10)
+        Button(frame, text="Delete", command=lambda: self.delete_group(group)).grid(row=5, column=3, padx=10)
 
         self.groups.append(group)
 
@@ -282,30 +412,36 @@ class CategoryCreator:
         category.display_name = self.category_name_entry.get().strip()
         category.db_name = db_name(category.display_name)
         for i, g in enumerate(self.groups):
-            name: str = g["name"].get_string()
-            col_type: str = g["type"].get_string()
-            col_prim: bool = g["is_key"].get_string()
+            name: str = g["name"].get()
+            col_type: str = g["type"].get()
+            col_prim: bool = g["is_key"].get()
+            text_area: bool = g["text_area"].get() and col_type == self.STRING
             if col_prim:
                 has_primary_key = True
             try:
-                decimal_digits = int(g["decimal_digits"].get_string()) if col_type == "INTEGER" else 0
+                decimal_digits = int(g["decimal_digits"].get()) if col_type == self.INTEGER else 0
             except ValueError:
                 decimal_digits = 0
-            incrementer = col_type == "INTEGER" and decimal_digits == 0 and g["incrementer"].get_string()
+            incrementer = col_type == self.INTEGER and decimal_digits == 0 and g["incrementer"].get()
             if db_name(name) in category.columns:
-                # Todo: some kind of error popover
+                show_error(f"Field '{name}' would create a duplicate column name in database")
                 return
-            category.columns[db_name(name)] = (name, col_prim, col_type, decimal_digits, incrementer)
+            category.columns[db_name(name)] = (name, col_prim, col_type, decimal_digits, incrementer, text_area)
         if not has_primary_key:
-            # Todo: some kind of error popover
+            show_error("Category can't be added\nMissing at least one primary key")
             return
         if not category.add_category():
-            # Todo: some kind of error popover
+            show_error("Failed to add Category")
             return
         self.base.categories.append(category)
+        show_info("Successfully added Category")
 
 class EntryAdder:
     def __init__(self, category: Category):
+        self.STRING: Final[str] = "TEXT"
+        self.INTEGER: Final[str] = "INTEGER"
+        self.BOOLEAN: Final[str] = "BOOLEAN"
+
         self.master = Toplevel()
         self.master.title("Create Entry into " + category.display_name)
         self.master.minsize(550, 400)
@@ -318,22 +454,28 @@ class EntryAdder:
         self.default_values = []
         pos = 0
         for tab_name, col in category.columns.items():
-            disp_name, _, col_type, decimal_digits, _ = col
+            disp_name, _, col_type, decimal_digits, _, text_area = col
 
-            if col_type == "TEXT":
+            if col_type == self.STRING and text_area:
+                entry = TKScrollText(self.master, wrap=WORD, height=3, width=30)
+                self.default_values.append("")
+                self.elements.append(ScrollText(entry))
+            elif col_type == self.STRING:
                 var = StringVar(self.master)
                 self.default_values.append("")
                 self.elements.append(var)
-                entry = Entry(self.master, textvariable=var)
-            elif col_type == "BOOLEAN":
+                entry = Entry(self.master, textvariable=var, width=30)
+            elif col_type == self.BOOLEAN:
                 var = BooleanVar(self.master)
                 self.default_values.append(False)
                 self.elements.append(var)
                 entry = Checkbutton(self.master, variable=var)
-            else:
-                entry = NumberEntry(self.master, decimal_digits,None)
+            elif col_type == self.INTEGER:
+                entry = NumberEntry(self.master, decimal_digits,None, width=15)
                 self.default_values.append("")
                 self.elements.append(entry)
+            else:
+                continue
             Label(self.master, text=disp_name+":").grid(row=pos, column=0, sticky=W, padx=4, pady=3)
             entry.grid(row=pos, column=1, sticky=W)
             pos += 1
@@ -343,12 +485,13 @@ class EntryAdder:
 
     def add_to_db(self):
         values = [e.get() for e in self.elements]
+        values = [e if type(e) is not str else e.strip() for e in values]
         try:
             with con as cur:
                 command = f"INSERT INTO {self.db_name} ({self.col_names}) VALUES ({self.question_marks});"
                 cur.execute(command, values)
-        except sqlite3.Error:
-            # Todo: some kind of error popover
+        except sqlite3.Error as e:
+            show_error(f"Failed to insert new entry:\n{e}")
             return
         self.reset()
 
@@ -367,27 +510,44 @@ class TableView:
         category_db_name = category.db_name
         col_names = ", ".join(list(category.columns.keys()))
         cur = con.cursor()
-        result = cur.execute(f"SELECT {col_names} FROM {category_db_name} ORDER BY {col_names};").fetchall()
-        if result is None:
+        query_result = cur.execute(f"SELECT {col_names} FROM {category_db_name} ORDER BY {col_names};").fetchall()
+        if query_result is None:
+            show_info("Table Query failed")
             self.master.destroy()
 
-        t = SimpleTable(self.master, 10,2)
-        t.pack(side="top", fill="x")
-        t.set(0,0,"Hello, world this is extra long, show me what you got")
+        result: list[list[str]] = [[val for val, *_ in self.category.columns.values()]]
+        incrementer = [val for _, _, _ , _, val, *_ in self.category.columns.values()]
+        query_result = [list(e) for e in query_result]
+        for e in query_result:
+            result.append(category.transform_values(e))
 
-    @staticmethod
-    def autosize_columns(tree):
-        font = tk_font.nametofont("TkDefaultFont")
 
-        for col in tree["columns"]:
-            max_width = font.measure(col)
+        def update_label(row: int, col_pos: int, increment: bool,
+                         widget_to_update: tkinter.Label) -> None:
+            column = query_result[row]
+            col_copy = query_result[row].copy()
+            if col_copy[col_pos] is None:
+                col_copy[col_pos] = 1 if increment else 0
+            else:
+                col_copy[col_pos] += 1 if increment else (-1 if col_copy[col_pos] > 0 else 0)
+            try:
+                with con as local_cur:
+                    command, values = category.get_partial_update(column, col_copy[col_pos], col_pos)
+                    local_cur.execute(command, values)
+            except sqlite3.Error as err:
+                show_error(f"Could not update field:\n{err}")
+                return
+            widget_to_update.config(text=str(col_copy[col_pos]))
+            query_result[row] = col_copy
 
-            for item in tree.get_children():
-                text = str(tree.set(item, col))
-                max_width = max(max_width, font.measure(text))
+        scroll = ScrollableFrame(self.master, max_height=300)
+        scroll.pack(fill="both", expand=True, padx=10, pady=10)
 
-            tree.column(col, width=max_width + 20)
-
+        frame = SimpleTable(scroll.inner, result, incrementer, update_label)
+        frame.pack(side="top", fill="x")
+        self.master.update_idletasks()
+        h = frame.winfo_height()
+        self.master.geometry(f"{frame.winfo_width() + 40}x{h if h < 1000 else 1000}")
 
 
 class BaseInterface:
@@ -409,7 +569,9 @@ class BaseInterface:
         def create_category() -> None:
             CategoryCreator(self)
 
-        TableView(self.categories[0])
+        # Todo: hide main window when opening a subwindow and showing it again after the subwindow has been closed
+        EntryAdder(self.categories[1])
+        TableView(self.categories[1])
 
         Button(self.master, text='Create New Category', command=create_category).grid(row=0, column=0)
 
