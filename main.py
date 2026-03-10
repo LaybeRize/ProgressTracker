@@ -6,9 +6,216 @@ import sqlite3
 from tkinter import *
 import tkinter.font as tk_font
 import tkinter.messagebox
-from typing import Final, Callable
+from typing import Final, Callable, Any
 from tkinter.scrolledtext import ScrolledText as TKScrollText
 from functools import partial
+
+#------------------------------------
+# helper functions
+#------------------------------------
+
+
+def format_number(value: int | None, decimal_digits: int) -> str:
+    if value is None:
+        return ""
+    if decimal_digits < 1:
+        return str(value)
+    base_string = str(value)
+    base_string = ((decimal_digits - len(base_string) + 1) * "0") + base_string
+    return base_string[:-decimal_digits] + "." + base_string[-decimal_digits:]
+
+def format_number_trim(value: int, decimal_digits: int) -> str:
+    if decimal_digits < 1:
+        return str(value)
+    base_string = format_number(value, decimal_digits)
+    base_string = base_string.rstrip("0")
+    return base_string.rstrip(".")
+
+
+#------------------------------------
+# DB Connection
+#------------------------------------
+
+
+find_spaces = re.compile(r"[ \t\n]", flags=re.MULTILINE | re.UNICODE)
+find_non_letters = re.compile(r"[^a-zA-Z]", flags=re.MULTILINE | re.UNICODE)
+
+
+def db_name(display_name: str) -> str:
+    display_name = find_spaces.sub("_", display_name)
+    return find_non_letters.sub("", display_name)
+
+
+sqlite3.register_adapter(bool, int)
+sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
+con = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
+database_on_disk = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
+with database_on_disk:
+    database_on_disk.backup(con)
+
+def update_disk_db(close: bool = True):
+    with con:
+        con.backup(database_on_disk)
+    if close:
+        con.close()
+        database_on_disk.close()
+
+atexit.register(update_disk_db)
+
+
+#------------------------------------
+# DB Abstractions
+#------------------------------------
+
+
+class TableTypes:
+    STRING: Final[str] = "TEXT"
+    INTEGER: Final[str] = "INTEGER"
+    BOOLEAN: Final[str] = "BOOLEAN"
+
+class Category:
+    def __init__(self):
+        self.id: int = -1
+        self.db_name: str = ""
+        self.display_name: str = ""
+        self.column_text: str = ""
+        self.__primary_key_statement: str = ""
+        self.__base_full_update: str = ""
+        self.__col_sql_list: str = ""
+        self.primary_key_pos: list[int] = []
+        self.__local_stored_result: list[list[Any]] = []
+        self.incrementer_list: list[bool] = []
+        self.col_display_names: list[str] = []
+
+        # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer, TextArea)
+        self.columns: dict[str, tuple[str, bool, str, int, bool, bool]] = {}
+
+    @classmethod
+    def load_categories_from_db(cls) -> list[Category]:
+        cur = con.cursor()
+        res_query = cur.execute("SELECT COUNT(*) AS nums FROM sqlite_master WHERE type='table' AND name='master';").fetchone()
+        if not res_query or res_query[0] < 1:
+            cur.execute("CREATE TABLE master (ID INTEGER PRIMARY KEY AUTOINCREMENT, DB_NAME TEXT UNIQUE, NAME TEXT, COLUMNS TEXT);")
+            return []
+        res_query = cur.execute("SELECT ID, DB_NAME, NAME, COLUMNS FROM master ORDER BY ID;").fetchall()
+        if res_query is None:
+            return []
+        categories = []
+        for entry in res_query:
+            cat = Category()
+            cat.id, cat.db_name, cat.display_name, cat.column_text = entry
+            cat._transform_text()
+            categories.append(cat)
+        return categories
+
+    def _transform_text(self):
+        if len(self.columns) == 0:
+            self.columns = eval(self.column_text)
+        else:
+            self.column_text = str(self.columns)
+        # helpful values that might be used internally or externally
+        prim_key = [(key, pos) for pos, (key, (_, val, *_)) in enumerate(self.columns.items()) if val]
+        self.primary_key_pos = [pos for _, pos in prim_key]
+        self.__primary_key_statement = " AND ".join([f"{key} = ?" for key, _ in prim_key])
+        self.__base_full_update = ", ".join([f"{key} = ?" for key in self.columns.keys()])
+        self.__col_sql_list = ", ".join(list(self.columns.keys()))
+        self.incrementer_list = [val for _, _, _, _, val, *_ in self.columns.values()]
+        self.col_display_names = [val for val, *_ in self.columns.values()]
+
+    def add_category(self) -> bool:
+        self._transform_text()
+        try:
+            with con as cur:
+                cur.execute("INSERT INTO master(DB_NAME, NAME, COLUMNS) VALUES(?, ?, ?)",
+                            (self.db_name, self.display_name, self.column_text,))
+                cur.execute(self._try_create_table())
+        except sqlite3.Error:
+            return False
+        return True
+
+    def _try_create_table(self):
+        tab_creator = f"CREATE TABLE {self.db_name} (" + \
+                      ", ".join([f"{key} {val}" for key, (_, _, val, *_) in self.columns.items()]) + ", PRIMARY KEY ("
+        for key, val in self.columns.items():
+            _, prim, *_ = val
+            if prim:
+                tab_creator += key + ", "
+        return tab_creator.removesuffix(", ") + "));"
+
+    def do_full_update(self, old_row_data: list, new_row_data: list) -> bool:
+        command = f"UPDATE {self.db_name} SET {self.__base_full_update} WHERE {self.__primary_key_statement};"
+        values = new_row_data + [old_row_data[i] for i in self.primary_key_pos]
+        try:
+            with con as local_cur:
+                local_cur.execute(command, values)
+        except sqlite3.Error as err:
+            show_error(f"Could not update row:\n{err}")
+            return False
+        return True
+
+    def do_partial_update(self, old_row_data: list, new_value, position: int) -> bool:
+        command = f"UPDATE {self.db_name} SET {list(self.columns.keys())[position]} = ? WHERE " \
+                  f"{self.__primary_key_statement};"
+        values = [new_value] + [old_row_data[i] for i in self.primary_key_pos]
+        try:
+            with con as local_cur:
+                local_cur.execute(command, values)
+        except sqlite3.Error as err:
+            show_error(f"Could not update field:\n{err}")
+            return False
+        return True
+
+    def add_entry(self, data: list) -> bool:
+        col_names = ", ".join(list(self.columns.keys()))
+        question_marks = ", ".join(["?"] * len(self.columns.keys()))
+        try:
+            with con as cur:
+                command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks});"
+                cur.execute(command, data)
+        except sqlite3.Error as e:
+            show_error(f"Failed to insert new entry:\n{e}")
+            return False
+        return True
+
+    def query_full_table(self) -> list[list] | None:
+        cur = con.cursor()
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list};"
+        query_result = cur.execute(command).fetchall()
+        cur.close()
+        if query_result is None:
+            show_info("Table Query failed")
+            return None
+        self.__local_stored_result = [list(e) for e in query_result]
+        return self.__local_stored_result
+
+    def transform_last_full_query_into_string(self) -> list[list[str]]:
+        return [self._transform_values(e) for e in self.__local_stored_result]
+
+    def _transform_values(self, data: list) -> list[str]:
+        temp_col = list(self.columns.values())
+        res: list[str] = []
+        for i, val in enumerate(data):
+            _, _, col_type, dec_digit, *_ = temp_col[i]
+
+            if col_type == TableTypes.STRING:
+                res.append(val)
+            elif col_type == TableTypes.BOOLEAN:
+                if val:
+                    res.append("✅")
+                else:
+                    res.append("❌")
+            elif col_type == TableTypes.INTEGER:
+                if val is None:
+                    res.append("")
+                else:
+                    res.append(format_number_trim(val, dec_digit))
+
+        return res
+
+
+#------------------------------------
+# tkinter addition classes and functions
+#------------------------------------
 
 
 def show_error(msg: str):
@@ -61,7 +268,7 @@ class ScrollableFrame(Frame):
         self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
 
-    def _on_frame_configure(self, event=None):
+    def _on_frame_configure(self, _=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_canvas_configure(self, event):
@@ -155,147 +362,17 @@ class NumberEntry(Entry):
         back += "0" * (self.decimal_digits - len(back))
         return int(front + back)
 
-def format_number(value: int | None, decimal_digits: int) -> str:
-    if value is None:
-        return ""
-    if decimal_digits < 1:
-        return str(value)
-    base_string = str(value)
-    base_string = ((decimal_digits - len(base_string) + 1) * "0") + base_string
-    return base_string[:-decimal_digits] + "." + base_string[-decimal_digits:]
 
-def format_number_trim(value: int, decimal_digits: int) -> str:
-    if decimal_digits < 1:
-        return str(value)
-    base_string = format_number(value, decimal_digits)
-    base_string = base_string.rstrip("0")
-    return base_string.rstrip(".")
-
-
-find_spaces = re.compile(r"[ \t\n]", flags=re.MULTILINE | re.UNICODE)
-find_non_letters = re.compile(r"[^a-zA-Z]", flags=re.MULTILINE | re.UNICODE)
-
-
-def db_name(display_name: str) -> str:
-    display_name = find_spaces.sub("_", display_name)
-    return find_non_letters.sub("", display_name)
-
-
-sqlite3.register_adapter(bool, int)
-sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
-con = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
-database_on_disk = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
-with database_on_disk:
-    database_on_disk.backup(con)
-
-def update_disk_db(close: bool = True):
-    with con:
-        con.backup(database_on_disk)
-    if close:
-        con.close()
-        database_on_disk.close()
-
-atexit.register(update_disk_db)
-
-
-class Category:
-    def __init__(self):
-        self.id: int = -1
-        self.db_name: str = ""
-        self.display_name: str = ""
-        self.column_text: str = ""
-
-        self.STRING: Final[str] = "TEXT"
-        self.INTEGER: Final[str] = "INTEGER"
-        self.BOOLEAN: Final[str] = "BOOLEAN"
-        # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer, TextArea)
-        self.columns: dict[str, tuple[str, bool, str, int, bool, bool]] = {}
-
-    @classmethod
-    def load_categories_from_db(cls) -> list[Category]:
-        cur = con.cursor()
-        res_query = cur.execute("SELECT COUNT(*) AS nums FROM sqlite_master WHERE type='table' AND name='master';").fetchone()
-        if not res_query or res_query[0] < 1:
-            cur.execute("CREATE TABLE master (ID INTEGER PRIMARY KEY AUTOINCREMENT, DB_NAME TEXT UNIQUE, NAME TEXT, COLUMNS TEXT);")
-            return []
-        res_query = cur.execute("SELECT ID, DB_NAME, NAME, COLUMNS FROM master ORDER BY ID;").fetchall()
-        if res_query is None:
-            return []
-        categories = []
-        for entry in res_query:
-            cat = Category()
-            cat.id, cat.db_name, cat.display_name, cat.column_text = entry
-            cat._transform_text()
-            categories.append(cat)
-        return categories
-
-    def _transform_text(self):
-        if len(self.columns) == 0:
-            self.columns = eval(self.column_text)
-        else:
-            self.column_text = str(self.columns)
-
-    def add_category(self) -> bool:
-        self._transform_text()
-        try:
-            with con as cur:
-                cur.execute("INSERT INTO master(DB_NAME, NAME, COLUMNS) VALUES(?, ?, ?)",
-                            (self.db_name, self.display_name, self.column_text,))
-                cur.execute(self._try_create_table())
-        except sqlite3.Error:
-            return False
-        return True
-
-    def _try_create_table(self):
-        tab_creator = f"CREATE TABLE {self.db_name} (" + \
-                      ", ".join([f"{key} {val}" for key, (_, _, val, *_) in self.columns.items()]) + ", PRIMARY KEY ("
-        for key, val in self.columns.items():
-            _, prim, *_ = val
-            if prim:
-                tab_creator += key + ", "
-        return tab_creator.removesuffix(", ") + "));"
-
-    def get_full_update_clause(self) -> str:
-        return f"UPDATE {self.db_name} SET " + \
-            ", ".join([f"{key} = ?" for key in self.columns.keys()]) + " WHERE " + \
-            " AND ".join([f"{key} = ?" for key in self.columns.keys()]) + ";"
-
-    def get_partial_update(self, row_data: list, new_value, position: int) -> tuple[str, list]:
-        update_clause = f"UPDATE {self.db_name} SET {list(self.columns.keys())[position]} = ? WHERE "
-        prim_key = [(key, pos) for pos, (key, (_, val, *_)) in enumerate(self.columns.items()) if val]
-        values = [new_value] + [row_data[pos] for _, pos in prim_key]
-        return update_clause + " AND ".join([f"{key} = ?" for key, _ in prim_key]) + ";", values
-
-    def transform_values(self, data: list) -> list[str]:
-        temp_col = list(self.columns.values())
-        res: list[str] = []
-        for i, val in enumerate(data):
-            _, _, col_type, dec_digit, *_ = temp_col[i]
-
-            if col_type == self.STRING:
-                res.append(val)
-            elif col_type == self.BOOLEAN:
-                if val:
-                    res.append("✅")
-                else:
-                    res.append("❌")
-            elif col_type == self.INTEGER:
-                if val is None:
-                    res.append("")
-                else:
-                    res.append(format_number_trim(val, dec_digit))
-
-        return res
+#------------------------------------
+# Tkinter Visual Interfaces
+#------------------------------------
 
 
 class CategoryCreator:
     def __init__(self, base:BaseInterface):
         self.base = base
         base.master.withdraw()
-        self.STRING: Final[str] = "TEXT"
-        self.INTEGER: Final[str] = "INTEGER"
-        self.BOOLEAN: Final[str] = "BOOLEAN"
-        self.options = [self.STRING, self.INTEGER, self.BOOLEAN]
+        self.options = [TableTypes.STRING, TableTypes.INTEGER, TableTypes.BOOLEAN]
 
         self.master = Toplevel()
         self.master.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -411,14 +488,14 @@ class CategoryCreator:
             name: str = g["name"].get()
             col_type: str = g["type"].get()
             col_prim: bool = g["is_key"].get()
-            text_area: bool = g["text_area"].get() and col_type == self.STRING
+            text_area: bool = g["text_area"].get() and col_type == TableTypes.STRING
             if col_prim:
                 has_primary_key = True
             try:
-                decimal_digits = int(g["decimal_digits"].get()) if col_type == self.INTEGER else 0
+                decimal_digits = int(g["decimal_digits"].get()) if col_type == TableTypes.INTEGER else 0
             except ValueError:
                 decimal_digits = 0
-            incrementer = col_type == self.INTEGER and decimal_digits == 0 and g["incrementer"].get()
+            incrementer = col_type == TableTypes.INTEGER and decimal_digits == 0 and g["incrementer"].get()
             if db_name(name) in category.columns:
                 show_error(f"Field '{name}' would create a duplicate column name in database")
                 return
@@ -435,11 +512,8 @@ class CategoryCreator:
 class EntryAdder:
     def __init__(self,base: BaseInterface, category: Category):
         self.base = base
+        self.category = category
         base.master.withdraw()
-
-        self.STRING: Final[str] = "TEXT"
-        self.INTEGER: Final[str] = "INTEGER"
-        self.BOOLEAN: Final[str] = "BOOLEAN"
 
         self.master = Toplevel()
         self.master.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -447,30 +521,27 @@ class EntryAdder:
         self.master.minsize(550, 400)
         self.master.focus_force()
 
-        self.db_name = category.db_name
-        self.col_names = ", ".join(list(category.columns.keys()))
-        self.question_marks = ", ".join(["?"] * len(category.columns.keys()))
         self.elements = []
         self.default_values = []
         pos = 0
         for tab_name, col in category.columns.items():
             disp_name, _, col_type, decimal_digits, _, text_area = col
 
-            if col_type == self.STRING and text_area:
+            if col_type == TableTypes.STRING and text_area:
                 entry = TKScrollText(self.master, wrap=WORD, height=3, width=30)
                 self.default_values.append("")
                 self.elements.append(ScrollText(entry))
-            elif col_type == self.STRING:
+            elif col_type == TableTypes.STRING:
                 var = StringVar(self.master)
                 self.default_values.append("")
                 self.elements.append(var)
                 entry = Entry(self.master, textvariable=var, width=30)
-            elif col_type == self.BOOLEAN:
+            elif col_type == TableTypes.BOOLEAN:
                 var = BooleanVar(self.master)
                 self.default_values.append(False)
                 self.elements.append(var)
                 entry = Checkbutton(self.master, variable=var)
-            elif col_type == self.INTEGER:
+            elif col_type == TableTypes.INTEGER:
                 entry = NumberEntry(self.master, decimal_digits,None, width=15)
                 self.default_values.append("")
                 self.elements.append(entry)
@@ -490,12 +561,7 @@ class EntryAdder:
     def add_to_db(self):
         values = [e.get() for e in self.elements]
         values = [e if type(e) is not str else e.strip() for e in values]
-        try:
-            with con as cur:
-                command = f"INSERT INTO {self.db_name} ({self.col_names}) VALUES ({self.question_marks});"
-                cur.execute(command, values)
-        except sqlite3.Error as e:
-            show_error(f"Failed to insert new entry:\n{e}")
+        if not self.category.add_entry(values):
             return
         self.reset()
 
@@ -504,30 +570,18 @@ class EntryAdder:
             element.set(self.default_values[i])
 
 class TableView:
-    def __init__(self, base: BaseInterface, category: Category):
-        self.base = base
-        base.master.withdraw()
-
+    def __init__(self, category: Category):
         self.category = category
         self.master = Toplevel()
-        self.master.protocol("WM_DELETE_WINDOW", self.destroy)
         self.master.title("View " + category.display_name)
         self.master.minsize(550, 400)
         self.master.focus_force()
 
-        category_db_name = category.db_name
-        col_names = ", ".join(list(category.columns.keys()))
-        cur = con.cursor()
-        query_result = cur.execute(f"SELECT {col_names} FROM {category_db_name} ORDER BY {col_names};").fetchall()
+        query_result: list[list[Any]] = category.query_full_table()
         if query_result is None:
-            show_info("Table Query failed")
             self.master.destroy()
 
-        result: list[list[str]] = [[val for val, *_ in self.category.columns.values()]]
-        incrementer = [val for _, _, _ , _, val, *_ in self.category.columns.values()]
-        query_result = [list(e) for e in query_result]
-        for e in query_result:
-            result.append(category.transform_values(e))
+        result: list[list[str]] = category.transform_last_full_query_into_string()
 
 
         def update_label(row: int, col_pos: int, increment: bool,
@@ -538,12 +592,7 @@ class TableView:
                 col_copy[col_pos] = 1 if increment else 0
             else:
                 col_copy[col_pos] += 1 if increment else (-1 if col_copy[col_pos] > 0 else 0)
-            try:
-                with con as local_cur:
-                    command, values = category.get_partial_update(column, col_copy[col_pos], col_pos)
-                    local_cur.execute(command, values)
-            except sqlite3.Error as err:
-                show_error(f"Could not update field:\n{err}")
+            if not category.do_partial_update(column, col_copy[col_pos], col_pos):
                 return
             widget_to_update.config(text=str(col_copy[col_pos]))
             query_result[row] = col_copy
@@ -551,15 +600,12 @@ class TableView:
         scroll = ScrollableFrame(self.master, max_height=300)
         scroll.pack(fill="both", expand=True, padx=10, pady=10)
 
-        frame = SimpleTable(scroll.inner, result, incrementer, update_label)
+        frame = SimpleTable(scroll.inner, [self.category.col_display_names] + result,
+                            category.incrementer_list, update_label)
         frame.pack(side="top", fill="x")
         self.master.update_idletasks()
         h = frame.winfo_height()
         self.master.geometry(f"{frame.winfo_width() + 40}x{h if h < 1000 else 1000}")
-
-    def destroy(self):
-        self.base.master.deiconify()
-        self.master.destroy()
 
 
 class BaseInterface:
@@ -581,9 +627,8 @@ class BaseInterface:
         def create_category() -> None:
             CategoryCreator(self)
 
-        # Todo: hide main window when opening a subwindow and showing it again after the subwindow has been closed
         # EntryAdder(self, self.categories[1])
-        # TableView(self, self.categories[1])
+        TableView(self.categories[1])
 
         Button(self.master, text='Create New Category', command=create_category).grid(row=0, column=0)
 
