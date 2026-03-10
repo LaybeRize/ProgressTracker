@@ -24,7 +24,9 @@ def format_number(value: int | None, decimal_digits: int) -> str:
     base_string = ((decimal_digits - len(base_string) + 1) * "0") + base_string
     return base_string[:-decimal_digits] + "." + base_string[-decimal_digits:]
 
-def format_number_trim(value: int, decimal_digits: int) -> str:
+def format_number_trim(value: int | None, decimal_digits: int) -> str:
+    if value is None:
+        return ""
     if decimal_digits < 1:
         return str(value)
     base_string = format_number(value, decimal_digits)
@@ -153,6 +155,17 @@ class Category:
             return False
         return True
 
+    def delete_entry(self, data: list) -> bool:
+        command = f"DELETE FROM {self.db_name} WHERE {self.__primary_key_statement};"
+        values = [data[i] for i in self.primary_key_pos]
+        try:
+            with con as local_cur:
+                local_cur.execute(command, values)
+        except sqlite3.Error as err:
+            show_error(f"Could not delete row:\n{err}")
+            return False
+        return True
+
     def do_partial_update(self, old_row_data: list, new_value, position: int) -> bool:
         command = f"UPDATE {self.db_name} SET {list(self.columns.keys())[position]} = ? WHERE " \
                   f"{self.__primary_key_statement};"
@@ -177,6 +190,16 @@ class Category:
             return False
         return True
 
+    def load_entry(self, data: list) -> list | None:
+        cur = con.cursor()
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} WHERE {self.__primary_key_statement};"
+        values = [data[i] for i in self.primary_key_pos]
+        query_result = cur.execute(command, values).fetchone()
+        cur.close()
+        if query_result is None:
+            return query_result
+        return list(query_result)
+
     def query_full_table(self) -> list[list] | None:
         cur = con.cursor()
         command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list};"
@@ -194,6 +217,7 @@ class Category:
     def _transform_values(self, data: list) -> list[str]:
         temp_col = list(self.columns.values())
         res: list[str] = []
+
         for i, val in enumerate(data):
             _, _, col_type, dec_digit, *_ = temp_col[i]
 
@@ -205,10 +229,7 @@ class Category:
                 else:
                     res.append("❌")
             elif col_type == TableTypes.INTEGER:
-                if val is None:
-                    res.append("")
-                else:
-                    res.append(format_number_trim(val, dec_digit))
+                res.append(format_number_trim(val, dec_digit))
 
         return res
 
@@ -340,14 +361,18 @@ class NumberEntry(Entry):
         Entry.__init__(self, master, textvariable=self.var, **kwargs)
         self.old_value: str = self.var.get()
         self.var.trace('w', self.check)
-        self.get_string, self.set = self.var.get, self.var.set
+        self.get_string, self.set_string = self.var.get, self.var.set
 
     def check(self, *_):
         if re.search(self.format, self.get_string(), flags=re.MULTILINE | re.UNICODE):
             self.old_value = self.get_string()
         else:
             # there's non-digit characters in the input; reject this
-            self.set(self.old_value)
+            self.set_string(self.old_value)
+
+    def set(self, value:int | None):
+        self.old_value = format_number_trim(value, self.decimal_digits)
+        self.set_string(self.old_value)
 
     def get(self) -> int | None:
         int_string = self.get_string()
@@ -509,8 +534,8 @@ class CategoryCreator:
         self.base.categories.append(category)
         show_info("Successfully added Category")
 
-class EntryAdder:
-    def __init__(self,base: BaseInterface, category: Category):
+class EntryManipulator:
+    def __init__(self, base: BaseInterface, category: Category):
         self.base = base
         self.category = category
         base.master.withdraw()
@@ -521,53 +546,143 @@ class EntryAdder:
         self.master.minsize(550, 400)
         self.master.focus_force()
 
+        self.dropdown_text = StringVar(self.master, "Add Entry")
+        self.dropdown_text.trace_add("write", self.on_update)
+        self.mode_dict = {
+            "Add Entry": lambda : self.set_button_for_add_entry(),
+            "Manipulate Entry": lambda: self.set_button_for_modify_entry(),
+            "Delete Entry": lambda: self.set_button_for_delete_entry()
+        }
+        Label(self.master, text="Edit Mode:").grid(row=0, column=0, sticky=W, padx=4)
+        dropdown = OptionMenu(self.master, self.dropdown_text,
+                              *list(self.mode_dict.keys()))
+        dropdown.grid(column=1, row=0, pady=5, sticky="w")
+
+        self.var_elements = []
         self.elements = []
         self.default_values = []
-        pos = 0
+        self.queried_entry = []
+
+        pos = 1
         for tab_name, col in category.columns.items():
             disp_name, _, col_type, decimal_digits, _, text_area = col
 
             if col_type == TableTypes.STRING and text_area:
                 entry = TKScrollText(self.master, wrap=WORD, height=3, width=30)
                 self.default_values.append("")
-                self.elements.append(ScrollText(entry))
+                self.var_elements.append(ScrollText(entry))
             elif col_type == TableTypes.STRING:
                 var = StringVar(self.master)
                 self.default_values.append("")
-                self.elements.append(var)
+                self.var_elements.append(var)
                 entry = Entry(self.master, textvariable=var, width=30)
             elif col_type == TableTypes.BOOLEAN:
                 var = BooleanVar(self.master)
                 self.default_values.append(False)
-                self.elements.append(var)
+                self.var_elements.append(var)
                 entry = Checkbutton(self.master, variable=var)
             elif col_type == TableTypes.INTEGER:
                 entry = NumberEntry(self.master, decimal_digits,None, width=15)
-                self.default_values.append("")
-                self.elements.append(entry)
+                self.default_values.append(None)
+                self.var_elements.append(entry)
             else:
                 continue
             Label(self.master, text=disp_name+":").grid(row=pos, column=0, sticky=W, padx=4, pady=3)
             entry.grid(row=pos, column=1, sticky=W)
+            self.elements.append(entry)
             pos += 1
 
-        Button(self.master, text='Add Entry', command=self.add_to_db).grid(row=pos, column=0, pady=5)
-        Button(self.master, text='Reset Entries', command=self.reset).grid(row=pos, column=1)
+        frame = Frame(self.master)
+        frame.grid(row=pos, column=0, columnspan=2, pady=5)
+        self.btn_one = Button(frame)
+        self.btn_one.grid(row=pos, column=0)
+        self.btn_two = Button(frame)
+        self.btn_two.grid(row=pos, column=1, padx=5, sticky="w")
+        self.btn_three = Button(frame)
+        self.btn_three.grid(row=pos, column=2, padx=5, sticky="w")
+        self.set_button_for_add_entry()
+
+    def on_update(self, *_):
+        self.mode_dict[self.dropdown_text.get()]()
+
+    def set_button_for_add_entry(self):
+        self.btn_one.config(text='Add Entry', command=self.add_to_db)
+        self.btn_two.config(text='Reset Fields', command=self.reset)
+        self.btn_three.config(text='Free Entry', command=lambda: None, state="disabled")
+
+    def set_button_for_modify_entry(self):
+        self.btn_one.config(text='Query Entry', command=self.query_entries)
+        self.btn_two.config(text='Update Entry', command=self.modify_entry, state="disabled")
+        self.btn_three.config(text='Free Entry', command=self.free_entry, state="disabled")
+
+    def set_button_for_delete_entry(self):
+        self.btn_one.config(text='Query Entry', command=lambda: self.query_entries(True))
+        self.btn_two.config(text='Delete Queried Entry', command=self.delete_entry, state="disabled")
+        self.btn_three.config(text='Free Entry', command=self.free_entry, state="disabled")
+
+    def query_entries(self, lock_fields: bool = False):
+        values = [e.get() for e in self.var_elements]
+        values = [e if type(e) is not str else e.strip() for e in values]
+        result = self.category.load_entry(values)
+        if result is None:
+            show_info("Could not find an entry with the given key")
+            return
+        self.queried_entry = result.copy()
+        self.btn_one.configure(state="disabled")
+        self.btn_two.configure(state="active")
+        self.btn_three.configure(state="active")
+        for i, element in enumerate(self.var_elements):
+            element.set(self.queried_entry[i])
+        if lock_fields:
+            self.disable_entries()
+
+    def modify_entry(self):
+        values = [e.get() for e in self.var_elements]
+        values = [e if type(e) is not str else e.strip() for e in values]
+        if not self.category.do_full_update(self.queried_entry, values):
+            return
+        self.btn_one.configure(state="active")
+        self.btn_two.configure(state="disabled")
+        self.btn_three.configure(state="disabled")
+        self.reset()
+
+    def delete_entry(self):
+        if not self.category.delete_entry(self.queried_entry):
+            return
+        self.enable_entries()
+        self.reset()
+        self.btn_one.configure(state="active")
+        self.btn_two.configure(state="disabled")
+        self.btn_three.configure(state="disabled")
+
+    def free_entry(self):
+        self.enable_entries()
+        self.btn_one.configure(state="active")
+        self.btn_two.configure(state="disabled")
+        self.btn_three.configure(state="disabled")
+        self.reset()
+
+    def disable_entries(self):
+        [entry.config(state="disabled") for entry in self.elements]
+
+    def enable_entries(self):
+        [entry.config(state="normal") for entry in self.elements]
 
     def destroy(self):
         self.base.master.deiconify()
         self.master.destroy()
 
     def add_to_db(self):
-        values = [e.get() for e in self.elements]
+        values = [e.get() for e in self.var_elements]
         values = [e if type(e) is not str else e.strip() for e in values]
         if not self.category.add_entry(values):
             return
         self.reset()
 
     def reset(self):
-        for i, element in enumerate(self.elements):
+        for i, element in enumerate(self.var_elements):
             element.set(self.default_values[i])
+
 
 class TableView:
     def __init__(self, category: Category):
@@ -627,8 +742,8 @@ class BaseInterface:
         def create_category() -> None:
             CategoryCreator(self)
 
-        # EntryAdder(self, self.categories[1])
-        TableView(self.categories[1])
+        EntryManipulator(self, self.categories[1])
+        #TableView(self.categories[1])
 
         Button(self.master, text='Create New Category', command=create_category).grid(row=0, column=0)
 
