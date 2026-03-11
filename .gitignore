@@ -1,4 +1,5 @@
 data.sqlite
 .idea
 .venv
-*.exe
+test.py
+data.html

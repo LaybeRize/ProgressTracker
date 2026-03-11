@@ -24,6 +24,7 @@ def format_number(value: int | None, decimal_digits: int) -> str:
     base_string = ((decimal_digits - len(base_string) + 1) * "0") + base_string
     return base_string[:-decimal_digits] + "." + base_string[-decimal_digits:]
 
+
 def format_number_trim(value: int | None, decimal_digits: int) -> str:
     if value is None:
         return ""
@@ -32,6 +33,26 @@ def format_number_trim(value: int | None, decimal_digits: int) -> str:
     base_string = format_number(value, decimal_digits)
     base_string = base_string.rstrip("0")
     return base_string.rstrip(".")
+
+def format_string_to_number(value: str, decimal_digits: int) -> int | None:
+    value = value.strip()
+    general_format = re.compile(r"^[0-9]+(\.[0-9]*)?$", flags=re.MULTILINE | re.UNICODE)
+    num_format = re.compile(r"^[0-9]*(\.[0-9]{0," + str(decimal_digits) + r"})?" if decimal_digits > 0 else r"^[0-9]*",
+                        flags=re.MULTILINE | re.UNICODE)
+    if general_format.search(value):
+        m = num_format.search(value).group()
+        if decimal_digits < 1:
+            return int(m)
+        if m.count(".") > 0 and not m.endswith("."):
+            amt = len(m.split(".")[-1])
+            m = int(m.replace(".", ""))
+            return m * (10 ** (decimal_digits - amt))
+        else:
+            return int(m.removesuffix(".")) * (10 ** decimal_digits)
+    else:
+        return None
+
+
 
 
 #------------------------------------
@@ -51,6 +72,7 @@ def db_name(display_name: str) -> str:
 sqlite3.register_adapter(bool, int)
 sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
 con = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
+con.isolation_level = None
 database_on_disk = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_DECLTYPES)
 with database_on_disk:
     database_on_disk.backup(con)
@@ -65,6 +87,24 @@ def update_disk_db(close: bool = True):
 atexit.register(update_disk_db)
 
 
+def open_cursor() -> sqlite3.Cursor:
+    cur = con.cursor()
+    cur.execute("BEGIN")
+    return cur
+
+
+def rollback(cur: sqlite3.Cursor, error_msg:str = None):
+    cur.execute("ROLLBACK")
+    cur.close()
+    if error_msg is not None:
+        show_error(error_msg)
+
+
+def commit(cur: sqlite3.Cursor):
+    cur.execute("COMMIT")
+    cur.close()
+
+
 #------------------------------------
 # DB Abstractions
 #------------------------------------
@@ -74,6 +114,66 @@ class TableTypes:
     STRING: Final[str] = "TEXT"
     INTEGER: Final[str] = "INTEGER"
     BOOLEAN: Final[str] = "BOOLEAN"
+
+
+class CategoryColumn:
+    __COL_NAME: Final[str] = "columnName"
+    __DISPLAY_NAME: Final[str] = "displayName"
+    __IS_PRIMARY_KEY: Final[str] = "isPrimaryKey"
+    __COL_TYPE: Final[str] = "columnType"
+    __DECIMAL_DIGITS: Final[str] = "decimalDigits"
+    __INCREMENTER: Final[str] = "incrementer"
+    __TEXT_AREA: Final[str] = "textarea"
+
+    def __init__(self, col_name: str | None, display_name: str | None, is_primary_key: bool | None,
+                 col_type: str | None, decimal_digits: int | None, incrementer: bool | None, text_area: bool | None):
+        self.col_name: str = col_name if col_name is not None else ""
+        self.display_name: str = display_name if display_name is not None else ""
+        self.is_primary_key: bool = is_primary_key if is_primary_key is not None else False
+        self.col_type: str = col_type if col_type is not None else TableTypes.STRING
+        self.decimal_digits: int = decimal_digits if decimal_digits is not None else 0
+        self.incrementer: bool = incrementer if incrementer is not None else False
+        self.text_area: bool = text_area if text_area is not None else False
+
+    @classmethod
+    def load_columns_from_dict(cls, data: dict[str, dict[str, Any]]) -> tuple[list[CategoryColumn], bool]:
+        columns = []
+        update_necessary = False
+
+        for key in data.keys():
+            col_dict = data[key]
+            values: list[Any] = [key]
+            for temp_key in [cls.__DISPLAY_NAME, cls.__IS_PRIMARY_KEY, cls.__COL_TYPE, cls.__DECIMAL_DIGITS,
+                             cls.__INCREMENTER, cls.__TEXT_AREA]:
+                if temp_key in col_dict:
+                    values.append(col_dict[temp_key])
+                else:
+                    update_necessary = True
+                    values.append(None)
+
+            columns.append(CategoryColumn(*values))
+
+        return columns, update_necessary
+
+    @classmethod
+    def transform_columns_to_dict(cls, columns: list[CategoryColumn]) -> dict[str, dict[str, Any]]:
+        return {e.col_name: {
+            cls.__DISPLAY_NAME: e.display_name,
+            cls.__IS_PRIMARY_KEY: e.is_primary_key,
+            cls.__COL_TYPE: e.col_type,
+            cls.__DECIMAL_DIGITS: e.decimal_digits,
+            cls.__INCREMENTER: e.incrementer,
+            cls.__TEXT_AREA: e.text_area
+        } for e in columns}
+
+    def transform_string_for_search(self, in_str: str) -> Any:
+        if self.col_type == TableTypes.STRING:
+            return in_str.strip()
+        elif self.col_type == TableTypes.BOOLEAN:
+            return in_str.strip().upper() in ["1", "YES", "TRUE"]
+        return format_string_to_number(in_str, self.decimal_digits)
+
+
 
 class Category:
     def __init__(self):
@@ -88,105 +188,233 @@ class Category:
         self.__local_stored_result: list[list[Any]] = []
         self.incrementer_list: list[bool] = []
         self.col_display_names: list[str] = []
+        self.db_column_names: list[str] = []
 
         # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer, TextArea)
-        self.columns: dict[str, tuple[str, bool, str, int, bool, bool]] = {}
+        self.columns: list[CategoryColumn] = []
 
     @classmethod
     def load_categories_from_db(cls) -> list[Category]:
-        cur = con.cursor()
+        cur = open_cursor()
         res_query = cur.execute("SELECT COUNT(*) AS nums FROM sqlite_master WHERE type='table' AND name='master';").fetchone()
         if not res_query or res_query[0] < 1:
             cur.execute("CREATE TABLE master (ID INTEGER PRIMARY KEY AUTOINCREMENT, DB_NAME TEXT UNIQUE, NAME TEXT, COLUMNS TEXT);")
+            commit(cur)
             return []
         res_query = cur.execute("SELECT ID, DB_NAME, NAME, COLUMNS FROM master ORDER BY ID;").fetchall()
+        commit(cur)
         if res_query is None:
             return []
         categories = []
         for entry in res_query:
             cat = Category()
             cat.id, cat.db_name, cat.display_name, cat.column_text = entry
-            cat._transform_text()
+            if cat._transform_text():
+                cat._update_in_db()
             categories.append(cat)
         return categories
 
-    def _transform_text(self):
+    def _transform_text(self) -> bool:
         if len(self.columns) == 0:
-            self.columns = eval(self.column_text)
+            self.columns, update = CategoryColumn.load_columns_from_dict(eval(self.column_text))
         else:
-            self.column_text = str(self.columns)
+            self.column_text = str(CategoryColumn.transform_columns_to_dict(self.columns))
+            update = False
+
         # helpful values that might be used internally or externally
-        prim_key = [(key, pos) for pos, (key, (_, val, *_)) in enumerate(self.columns.items()) if val]
+        prim_key = [(col.col_name, pos) for pos, col in enumerate(self.columns) if col.is_primary_key]
         self.primary_key_pos = [pos for _, pos in prim_key]
         self.__primary_key_statement = " AND ".join([f"{key} = ?" for key, _ in prim_key])
-        self.__base_full_update = ", ".join([f"{key} = ?" for key in self.columns.keys()])
-        self.__col_sql_list = ", ".join(list(self.columns.keys()))
-        self.incrementer_list = [val for _, _, _, _, val, *_ in self.columns.values()]
-        self.col_display_names = [val for val, *_ in self.columns.values()]
+        self.__base_full_update = ", ".join([f"{col.col_name} = ?" for col in self.columns])
+        self.__col_sql_list = ", ".join([col.col_name for col in self.columns])
+        self.incrementer_list = [col.incrementer for col in self.columns]
+        self.col_display_names = [col.display_name for col in self.columns]
+        self.db_column_names = [col.col_name for col in self.columns]
+
+        return update
 
     def add_category(self) -> bool:
         self._transform_text()
+        cur = open_cursor()
         try:
-            with con as cur:
-                cur.execute("INSERT INTO master(DB_NAME, NAME, COLUMNS) VALUES(?, ?, ?)",
-                            (self.db_name, self.display_name, self.column_text,))
-                cur.execute(self._try_create_table())
+            cat_id = cur.execute("INSERT INTO master(DB_NAME, NAME, COLUMNS) VALUES(?, ?, ?) RETURNING ID",
+                                 (self.db_name, self.display_name, self.column_text,)).fetchone()
+            cur.execute(self._try_create_table())
+            (self.id, ) = cat_id if cat_id else -1
+            commit(cur)
+        except sqlite3.Error as err:
+            rollback(cur, f"Could not create Category '{self.display_name}':\n{err}")
+            return False
+        return True
+
+    def _update_in_db(self) -> bool:
+        if self.id == -1:
+            return False
+        self._transform_text()
+        cur = open_cursor()
+        try:
+            cur.execute("UPDATE master SET DB_NAME = ?, NAME = ?, COLUMNS = ? WHERE ID = ?;",
+                        (self.db_name, self.display_name, self.column_text, self.id))
+            commit(cur)
         except sqlite3.Error:
+            rollback(cur)
+            return False
+        return True
+
+    def update_category(self, new_values: Category) -> bool:
+        old_data = self.query_full_table("Could not retrieve data for migration")
+        if old_data is None:
+            return False
+        old_data: list[list] = [list(e) for e in zip(*old_data)]
+        new_data: list[list] = []
+        cur = open_cursor()
+        try:
+            cur.execute(f"DROP TABLE {self.db_name};")
+            for pos, col in enumerate(new_values.columns):
+                new_column_value, new_column = self._generate_new_column(col, old_data)
+                if new_column_value is not None:
+                    new_data.append(new_column_value)
+                new_values.columns[pos] = new_column
+
+            self.display_name = new_values.display_name
+            self.db_name = new_values.db_name
+            self.columns = new_values.columns
+            self._transform_text()
+            cur.execute(self._try_create_table())
+            cur.execute("UPDATE master SET DB_NAME = ?, NAME = ?, COLUMNS = ? WHERE ID = ?;",
+                        (self.db_name, self.display_name, self.column_text, self.id))
+            col_names = ", ".join(self.db_column_names)
+            question_marks = ", ".join(["?"] * len(self.db_column_names))
+            command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks});"
+            new_data = [list(e) for e in zip(*new_data)]
+            if len(new_data) > 0:
+                cur.executemany(command, new_data)
+            commit(cur)
+        except Exception as err:
+            rollback(cur, f"Failed to update table:\n{err}")
+            return False
+        return True
+
+    def _generate_new_column(self, col: CategoryColumn, old_data: list[list]) -> tuple[list | None, CategoryColumn]:
+        old_column_name = col.display_name.split("->")[0].strip()
+        col.display_name = col.display_name.split("->")[-1].strip()
+        if len(old_data) == 0:
+            return None, col
+        if old_column_name in self.col_display_names:
+            prev_col_pos = self.col_display_names.index(old_column_name)
+            data = old_data[prev_col_pos]
+            new_data = self._transform_old_data(self.columns[prev_col_pos], col, data)
+        else:
+            row_amount = len(old_data[0])
+            new_data = [self._get_type_default(col.col_type)] * row_amount
+        return new_data, col
+
+    @staticmethod
+    def _transform_old_data(old_col: CategoryColumn, new_col: CategoryColumn, data: list) -> list:
+        if old_col.col_type != new_col.col_type:
+            if new_col.col_type == TableTypes.STRING:
+                if old_col.col_type == TableTypes.BOOLEAN:
+                    return ["✅" if val else "❌" for val in data]
+                else:
+                    # Has to be integer
+                    return [format_number_trim(val, old_col.decimal_digits) for val in data]
+            if new_col.col_type == TableTypes.INTEGER:
+                if old_col.col_type == TableTypes.STRING:
+                    return [format_string_to_number(val, new_col.decimal_digits) for val in data]
+                else:
+                    # Has to be boolean
+                    power = 10 ** new_col.decimal_digits
+                    return [power if val else 0 for val in data]
+            else:
+                # New col type is boolean
+                return [True if val else False for val in data]
+
+
+        if old_col.decimal_digits == new_col.decimal_digits:
+            return data
+        if old_col.decimal_digits > new_col.decimal_digits:
+            power = (10 ** (old_col.decimal_digits - new_col.decimal_digits))
+            return [val if val is None else val // power for val in data]
+        power = (10 ** (new_col.decimal_digits - old_col.decimal_digits))
+        return [val if val is None else val * power for val in data]
+
+    @staticmethod
+    def _get_type_default(col_type: str) -> Any:
+        if TableTypes.STRING == col_type:
+            return ""
+        elif TableTypes.INTEGER == col_type:
+            return None
+        elif TableTypes.BOOLEAN == col_type:
+            return False
+        return None
+
+    def delete_me(self) -> bool:
+        cur = open_cursor()
+        try:
+            cur.execute("DELETE FROM master WHERE ID = ?;",
+                        (self.id,))
+            cur.execute(f"DROP TABLE {self.db_name};")
+            commit(cur)
+        except sqlite3.Error as err:
+            rollback(cur, f"Could remove category '{self.display_name}':\n{err}")
             return False
         return True
 
     def _try_create_table(self):
         tab_creator = f"CREATE TABLE {self.db_name} (" + \
-                      ", ".join([f"{key} {val}" for key, (_, _, val, *_) in self.columns.items()]) + ", PRIMARY KEY ("
-        for key, val in self.columns.items():
-            _, prim, *_ = val
-            if prim:
-                tab_creator += key + ", "
+                      ", ".join([f"{col.col_name} {col.col_type}" for col in self.columns]) + ", PRIMARY KEY ("
+        for col in self.columns:
+            if col.is_primary_key:
+                tab_creator += col.col_name + ", "
         return tab_creator.removesuffix(", ") + "));"
 
     def do_full_update(self, old_row_data: list, new_row_data: list) -> bool:
         command = f"UPDATE {self.db_name} SET {self.__base_full_update} WHERE {self.__primary_key_statement};"
         values = new_row_data + [old_row_data[i] for i in self.primary_key_pos]
+        cur = open_cursor()
         try:
-            with con as local_cur:
-                local_cur.execute(command, values)
+            cur.execute(command, values)
+            commit(cur)
         except sqlite3.Error as err:
-            show_error(f"Could not update row:\n{err}")
+            rollback(cur, f"Could not update row:\n{err}")
             return False
         return True
 
     def delete_entry(self, data: list) -> bool:
         command = f"DELETE FROM {self.db_name} WHERE {self.__primary_key_statement};"
         values = [data[i] for i in self.primary_key_pos]
+        cur = open_cursor()
         try:
-            with con as local_cur:
-                local_cur.execute(command, values)
+            cur.execute(command, values)
+            commit(cur)
         except sqlite3.Error as err:
-            show_error(f"Could not delete row:\n{err}")
+            rollback(cur, f"Could not delete row:\n{err}")
             return False
         return True
 
     def do_partial_update(self, old_row_data: list, new_value, position: int) -> bool:
-        command = f"UPDATE {self.db_name} SET {list(self.columns.keys())[position]} = ? WHERE " \
+        command = f"UPDATE {self.db_name} SET {self.db_column_names[position]} = ? WHERE " \
                   f"{self.__primary_key_statement};"
         values = [new_value] + [old_row_data[i] for i in self.primary_key_pos]
+        cur = open_cursor()
         try:
-            with con as local_cur:
-                local_cur.execute(command, values)
+            cur.execute(command, values)
+            commit(cur)
         except sqlite3.Error as err:
-            show_error(f"Could not update field:\n{err}")
+            rollback(cur, f"Could not update field:\n{err}")
             return False
         return True
 
-    def add_entry(self, data: list) -> bool:
-        col_names = ", ".join(list(self.columns.keys()))
-        question_marks = ", ".join(["?"] * len(self.columns.keys()))
+    def add_entry(self, values: list) -> bool:
+        col_names = ", ".join(self.db_column_names)
+        question_marks = ", ".join(["?"] * len(self.db_column_names))
+        command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks});"
+        cur = open_cursor()
         try:
-            with con as cur:
-                command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks});"
-                cur.execute(command, data)
-        except sqlite3.Error as e:
-            show_error(f"Failed to insert new entry:\n{e}")
+            cur.execute(command, values)
+            commit(cur)
+        except sqlite3.Error as err:
+            rollback(cur, f"Failed to insert new entry:\n{err}")
             return False
         return True
 
@@ -200,36 +428,72 @@ class Category:
             return query_result
         return list(query_result)
 
-    def query_full_table(self) -> list[list] | None:
+    def query_full_table(self, error_text:str=None) -> list[list] | None:
         cur = con.cursor()
         command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list};"
         query_result = cur.execute(command).fetchall()
         cur.close()
         if query_result is None:
+            if error_text is not None:
+                show_error(error_text)
+                return None
             show_info("Table Query failed")
             return None
         self.__local_stored_result = [list(e) for e in query_result]
         return self.__local_stored_result
 
+    def query_first_page(self, error_text:str=None, row_amount: int = 10) -> tuple[list[list] | None, bool]:
+        # Todo: implement search via the transformation in the CategoryColumn function
+        cur = con.cursor()
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list} " \
+                  f"LIMIT {row_amount+1};"
+        query_result = cur.execute(command).fetchall()
+        cur.close()
+        if query_result is None:
+            if error_text is not None:
+                show_error(error_text)
+                return None, False
+            show_info("Table Query failed")
+            return None, False
+        self.__local_stored_result = [list(e) for e in query_result][:row_amount]
+        return self.__local_stored_result, len(query_result) == row_amount + 1
+
+    def query_all_other_pages(self, error_text:str=None, row_amount: int = 10) -> list[list[list]] | None:
+        cur = con.cursor()
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list} " \
+                  f"OFFSET {row_amount};"
+        query_result = cur.execute(command).fetchall()
+        cur.close()
+        if query_result is None:
+            if error_text is not None:
+                show_error(error_text)
+                return None
+            show_info("Table Query failed")
+            return None
+        pages = ((len(query_result) - 1) // row_amount) + 1
+        result = [[list(e) for e in query_result[off*row_amount:(off+1)*row_amount]] for off in range(pages)]
+        [self.__local_stored_result.extend(e) for e in result]
+        return result
+
     def transform_last_full_query_into_string(self) -> list[list[str]]:
+        # Todo: This concept should be refined. Fully quarry is only used for HTML, the table is paginated.
         return [self._transform_values(e) for e in self.__local_stored_result]
 
     def _transform_values(self, data: list) -> list[str]:
-        temp_col = list(self.columns.values())
         res: list[str] = []
 
         for i, val in enumerate(data):
-            _, _, col_type, dec_digit, *_ = temp_col[i]
+            cur_col_def = self.columns[i]
 
-            if col_type == TableTypes.STRING:
+            if cur_col_def.col_type == TableTypes.STRING:
                 res.append(val)
-            elif col_type == TableTypes.BOOLEAN:
+            elif cur_col_def.col_type == TableTypes.BOOLEAN:
                 if val:
                     res.append("✅")
                 else:
                     res.append("❌")
-            elif col_type == TableTypes.INTEGER:
-                res.append(format_number_trim(val, dec_digit))
+            elif cur_col_def.col_type == TableTypes.INTEGER:
+                res.append(format_number_trim(val, cur_col_def.decimal_digits))
 
         return res
 
@@ -245,6 +509,55 @@ def show_error(msg: str):
 
 def show_info(msg: str):
     tkinter.messagebox.showinfo("Info", msg)
+
+class SelectableLabel(Frame):
+    def __init__(self, parent, text="", **kwargs):
+        super().__init__(parent)
+
+        self.text = text
+
+        self.label = Label(self, text=text, anchor="w", **kwargs)
+        self.label.pack(fill="both", expand=True)
+
+        self.entry = Entry(
+            self,
+            relief="flat",
+            bg=self.label.cget("bg"),
+            readonlybackground=self.label.cget("bg"),
+            fg=self.label.cget("fg"),
+            font=self.label.cget("font"),
+            highlightthickness=0
+        )
+
+        self.label.bind("<Button-1>", self._activate_entry)
+        self.entry.bind("<FocusOut>", self._deactivate_entry)
+        self.entry.bind("<Return>", self._deactivate_entry)
+        self.entry.bind("<Escape>", self._deactivate_entry)
+
+    def _activate_entry(self, _=None):
+        self.entry.delete(0, "end")
+        self.entry.insert(0, self.text)
+        self.entry.config(state="readonly")
+        self.label.pack_forget()
+        self.entry.pack(fill="both", expand=True)
+
+        self.entry.focus_set()
+        self.entry.select_range(0, "end")
+
+    def _deactivate_entry(self, _=None):
+        self.text = self.entry.get()
+
+        self.entry.pack_forget()
+        self.label.config(text=self.text)
+        self.label.pack(fill="both", expand=True)
+
+    def config(self, **kwargs):
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+            self.label.config(text=self.text)
+            kwargs.pop("text")
+
+        self.label.config(**kwargs)
 
 
 class ScrollText:
@@ -289,6 +602,11 @@ class ScrollableFrame(Frame):
         self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
 
+    def unbind_scroll(self):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
     def _on_frame_configure(self, _=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -307,7 +625,7 @@ class ScrollableFrame(Frame):
 
 class SimpleTable(Frame):
     def __init__(self, parent, data: list[list[str]], incrementer: list[bool],
-                 func: Callable[[int, int, bool, tkinter.Label], None], **kwargs):
+                 func: Callable[[int, int, bool, SelectableLabel], None], **kwargs):
         # use black background so it "peeks through" to
         # form grid lines
         Frame.__init__(self, parent, background="black", **kwargs)
@@ -318,7 +636,7 @@ class SimpleTable(Frame):
                 if incrementer[column] and row != 0:
                     sub_frame = Frame(self, background="lightblue" if row == 0 else
                                             ("white" if row % 2 == 1 else "light gray"), width="20")
-                    label = Label(sub_frame, text=data[row][column],
+                    label = SelectableLabel(sub_frame, text=data[row][column],
                                   borderwidth=0,
                                   bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
                                   wraplength="250", justify="left")
@@ -335,7 +653,7 @@ class SimpleTable(Frame):
                     sub_frame.grid_columnconfigure(1, weight=1, minsize=250)
                     sub_frame.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
                 else:
-                    label = Label(self, text=data[row][column],
+                    label = SelectableLabel(self, text=data[row][column],
                                   borderwidth=0,
                                   bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
                                   wraplength="250", justify="left")
@@ -393,7 +711,7 @@ class NumberEntry(Entry):
 #------------------------------------
 
 
-class CategoryCreator:
+class CategoryEditor:
     def __init__(self, base:BaseInterface):
         self.base = base
         base.master.withdraw()
@@ -405,26 +723,38 @@ class CategoryCreator:
         self.master.minsize(550, 400)
         self.master.focus_force()
 
-        outer = ScrollableFrame(self.master)
-        self.scroll_frame = outer.inner
+        self.outer = ScrollableFrame(self.master)
+        self.scroll_frame = self.outer.inner
 
         self.groups = []
+        self.last_category: Category | None = None
+        self.last_category_pos: int = -1
         self.add_group()
 
         controls = Frame(self.master)
         category_info = Frame(self.master)
         category_info.pack(fill="x")
-        outer.pack(fill="both", expand=True)
+        self.outer.pack(fill="both", expand=True)
         controls.pack(fill="x")
 
-        self.category_name_entry = Entry(category_info)
+        self.category_name_var = StringVar(category_info, value="")
         Label(category_info, text="Category Name:").grid(row=0, column=0, sticky=W, padx=4)
-        self.category_name_entry.grid(row=0, column=1)
+        Entry(category_info, textvariable=self.category_name_var).grid(row=0, column=1)
 
         Button(controls, text="Add Group", command=self.add_group).pack(side="left")
-        Button(controls, text="Create Category", command=self.create_category).pack(side="left", padx=10)
+        self.create_btn = Button(controls, text="Create Category", command=self.create_category)
+        self.create_btn.pack(side="left", padx=3)
+        self.query_btn = Button(controls, text="Query Category", command=self.load_category)
+        self.query_btn.pack(side="left", padx=3)
+        self.update_btn = Button(controls, text="Update Category", command=self.edit_category, state="disabled")
+        self.update_btn.pack(side="left", padx=3)
+        self.delete_btn = Button(controls, text="Delete Category", command=self.delete_category, state="disabled")
+        self.delete_btn.pack(side="left", padx=3)
+        self.free_btn = Button(controls, text="Free Category", command=self.free_category, state="disabled")
+        self.free_btn.pack(side="left", padx=3)
 
     def destroy(self):
+        self.outer.unbind_scroll()
         self.base.master.deiconify()
         self.master.destroy()
 
@@ -452,19 +782,24 @@ class CategoryCreator:
         group["frame"].destroy()
         self.groups.remove(group)
 
-    def add_group(self):
+    def delete_all(self):
+        for g in self.groups:
+            self.delete_group(g)
+
+    def add_group(self, col: CategoryColumn = None):
         frame = Frame(self.scroll_frame, bd=2, relief="groove", padx=5, pady=5)
 
-        name_entry = Entry(frame)
-        type_var = StringVar(value=self.options[0])
+        name_entry_var = StringVar(frame, value="" if col is None else col.display_name)
+        name_entry = Entry(frame, textvariable=name_entry_var)
+        type_var = StringVar(frame, value=self.options[0] if col is None else col.col_type)
         type_entry = OptionMenu(frame, type_var,*self.options)
-        primary_key_var = BooleanVar(frame, value=False)
+        primary_key_var = BooleanVar(frame, value=False if col is None else col.is_primary_key)
         primary_key = Checkbutton(frame, variable=primary_key_var)
-        text_area_var = BooleanVar(frame, value=False)
+        text_area_var = BooleanVar(frame, value=False if col is None else col.text_area)
         text_area = Checkbutton(frame, variable=text_area_var)
-        incrementer_var = BooleanVar(frame, value=False)
+        incrementer_var = BooleanVar(frame, value=False if col is None else col.incrementer)
         incrementer = Checkbutton(frame, variable=incrementer_var)
-        decimal_digits = NumberEntry(frame)
+        decimal_digits = NumberEntry(frame, value=0 if col is None else col.decimal_digits)
 
 
         Label(frame, text="Column Name:").grid(row=0, column=0, sticky=W, padx=4)
@@ -487,7 +822,7 @@ class CategoryCreator:
 
         group = {
             "frame": frame,
-            "name": name_entry,
+            "name": name_entry_var,
             "type": type_var,
             "is_key": primary_key_var,
             "text_area": text_area_var,
@@ -507,32 +842,117 @@ class CategoryCreator:
     def create_category(self):
         has_primary_key = False
         category = Category()
-        category.display_name = self.category_name_entry.get().strip()
+        category.display_name = self.category_name_var.get().strip()
         category.db_name = db_name(category.display_name)
+        temp_col_names = []
         for i, g in enumerate(self.groups):
-            name: str = g["name"].get()
-            col_type: str = g["type"].get()
-            col_prim: bool = g["is_key"].get()
-            text_area: bool = g["text_area"].get() and col_type == TableTypes.STRING
+            name: str = g["name"].get().strip()
+            if name.count("->") > 0:
+                show_error(f"String '->' not allowed in column name '{name}' (reserved for renaming)")
+                return
+            col_type, col_prim, text_area, decimal_digits, incrementer = self._extract_group_values(g)
             if col_prim:
                 has_primary_key = True
-            try:
-                decimal_digits = int(g["decimal_digits"].get()) if col_type == TableTypes.INTEGER else 0
-            except ValueError:
-                decimal_digits = 0
-            incrementer = col_type == TableTypes.INTEGER and decimal_digits == 0 and g["incrementer"].get()
-            if db_name(name) in category.columns:
+            db_col_name = db_name(name)
+            if db_col_name in temp_col_names:
                 show_error(f"Field '{name}' would create a duplicate column name in database")
                 return
-            category.columns[db_name(name)] = (name, col_prim, col_type, decimal_digits, incrementer, text_area)
+            temp_col_names.append(db_col_name)
+            category.columns.append(CategoryColumn(db_col_name, name, col_prim, col_type, decimal_digits,
+                                                   incrementer, text_area))
         if not has_primary_key:
             show_error("Category can't be added\nMissing at least one primary key")
             return
-        if not category.add_category():
-            show_error("Failed to add Category")
+        if len(temp_col_names) < 1:
+            show_error("Can't create Category without columns")
             return
-        self.base.categories.append(category)
-        show_info("Successfully added Category")
+        if not category.add_category():
+            return
+        self.base.add_category(category)
+        show_info("Category successfully added ")
+
+    def load_category(self):
+        self.last_category = None
+        for pos, cat in enumerate(self.base.categories):
+            if cat.display_name == self.category_name_var.get().strip():
+                self.last_category = cat
+                self.last_category_pos = pos
+                break
+        if self.last_category is None:
+            show_error("No category with given name")
+            return
+        self.delete_all()
+        for col in self.last_category.columns:
+            self.add_group(col)
+        self.set_to_modify_state()
+
+    def edit_category(self):
+        has_primary_key = False
+        category = Category()
+        category.display_name = self.category_name_var.get().strip()
+        category.db_name = db_name(category.display_name)
+        temp_col_names = []
+        for i, g in enumerate(self.groups):
+            name: str = g["name"].get().strip()
+            if name.count("->") > 1:
+                show_error(f"Can't rename column '{name}' multiple times.")
+                return
+            col_type, col_prim, text_area, decimal_digits, incrementer = self._extract_group_values(g)
+            if col_prim:
+                has_primary_key = True
+            local_db_name = db_name(name.split("->")[-1].strip())
+            if local_db_name in temp_col_names:
+                show_error(f"Field '{name}' would create a duplicate column name in database")
+                return
+            temp_col_names.append(local_db_name)
+            category.columns.append(CategoryColumn(local_db_name, name, col_prim, col_type, decimal_digits,
+                                                   incrementer, text_area))
+        if not has_primary_key:
+            show_error("Category can't be added\nMissing at least one primary key")
+            return
+        if not self.last_category.update_category(category):
+            return
+        self.base.categories[self.last_category_pos] = self.last_category
+        show_info("Category successfully updated")
+
+    def delete_category(self):
+        if not self.last_category.delete_me():
+            return
+        self.base.categories.pop(self.last_category_pos)
+        self.last_category = None
+        self.create_and_query()
+        show_info("Category successfully deleted")
+
+    def free_category(self):
+        self.last_category = None
+        self.create_and_query()
+
+    @staticmethod
+    def _extract_group_values(g: dict) -> tuple[str, bool, bool, int, bool]:
+        col_type: str = g["type"].get()
+        col_prim: bool = g["is_key"].get()
+        text_area: bool = g["text_area"].get() and col_type == TableTypes.STRING
+        try:
+            decimal_digits = int(g["decimal_digits"].get()) if col_type == TableTypes.INTEGER else 0
+        except ValueError:
+            decimal_digits = 0
+        incrementer = col_type == TableTypes.INTEGER and decimal_digits == 0 and g["incrementer"].get()
+        return col_type, col_prim, text_area, decimal_digits, incrementer
+
+    def create_and_query(self):
+        self.create_btn.configure(state="active")
+        self.query_btn.configure(state="active")
+        self.update_btn.configure(state="disabled")
+        self.delete_btn.configure(state="disabled")
+        self.free_btn.configure(state="disabled")
+
+    def set_to_modify_state(self):
+        self.create_btn.configure(state="disabled")
+        self.query_btn.configure(state="disabled")
+        self.update_btn.configure(state="active")
+        self.delete_btn.configure(state="active")
+        self.free_btn.configure(state="active")
+
 
 class EntryManipulator:
     def __init__(self, base: BaseInterface, category: Category):
@@ -547,47 +967,49 @@ class EntryManipulator:
         self.master.focus_force()
 
         self.dropdown_text = StringVar(self.master, "Add Entry")
+        self.keep_entries = BooleanVar(self.master, False)
         self.dropdown_text.trace_add("write", self.on_update)
         self.mode_dict = {
             "Add Entry": lambda : self.set_button_for_add_entry(),
-            "Manipulate Entry": lambda: self.set_button_for_modify_entry(),
+            "Edit Entry": lambda: self.set_button_for_modify_entry(),
             "Delete Entry": lambda: self.set_button_for_delete_entry()
         }
         Label(self.master, text="Edit Mode:").grid(row=0, column=0, sticky=W, padx=4)
         dropdown = OptionMenu(self.master, self.dropdown_text,
                               *list(self.mode_dict.keys()))
-        dropdown.grid(column=1, row=0, pady=5, sticky="w")
+        dropdown.grid(column=1, row=0, pady=5, sticky=W)
+        Label(self.master, text="Keep Values:").grid(row=1, column=0, sticky=W, padx=4)
+        Checkbutton(self.master, text="Keep Field values after adding/editing/freeing", variable=self.keep_entries) \
+            .grid(row=1, column=1, sticky=W)
 
         self.var_elements = []
         self.elements = []
         self.default_values = []
         self.queried_entry = []
 
-        pos = 1
-        for tab_name, col in category.columns.items():
-            disp_name, _, col_type, decimal_digits, _, text_area = col
-
-            if col_type == TableTypes.STRING and text_area:
+        pos = 2
+        for col in category.columns:
+            if col.col_type == TableTypes.STRING and col.text_area:
                 entry = TKScrollText(self.master, wrap=WORD, height=3, width=30)
                 self.default_values.append("")
                 self.var_elements.append(ScrollText(entry))
-            elif col_type == TableTypes.STRING:
+            elif col.col_type == TableTypes.STRING:
                 var = StringVar(self.master)
                 self.default_values.append("")
                 self.var_elements.append(var)
                 entry = Entry(self.master, textvariable=var, width=30)
-            elif col_type == TableTypes.BOOLEAN:
+            elif col.col_type == TableTypes.BOOLEAN:
                 var = BooleanVar(self.master)
                 self.default_values.append(False)
                 self.var_elements.append(var)
                 entry = Checkbutton(self.master, variable=var)
-            elif col_type == TableTypes.INTEGER:
-                entry = NumberEntry(self.master, decimal_digits,None, width=15)
+            elif col.col_type == TableTypes.INTEGER:
+                entry = NumberEntry(self.master, col.decimal_digits,None, width=15)
                 self.default_values.append(None)
                 self.var_elements.append(entry)
             else:
                 continue
-            Label(self.master, text=disp_name+":").grid(row=pos, column=0, sticky=W, padx=4, pady=3)
+            Label(self.master, text=col.display_name+":").grid(row=pos, column=0, sticky=W, padx=4, pady=3)
             entry.grid(row=pos, column=1, sticky=W)
             self.elements.append(entry)
             pos += 1
@@ -597,9 +1019,9 @@ class EntryManipulator:
         self.btn_one = Button(frame)
         self.btn_one.grid(row=pos, column=0)
         self.btn_two = Button(frame)
-        self.btn_two.grid(row=pos, column=1, padx=5, sticky="w")
+        self.btn_two.grid(row=pos, column=1, padx=5, sticky=W)
         self.btn_three = Button(frame)
-        self.btn_three.grid(row=pos, column=2, padx=5, sticky="w")
+        self.btn_three.grid(row=pos, column=2, padx=5, sticky=W)
         self.set_button_for_add_entry()
 
     def on_update(self, *_):
@@ -650,7 +1072,7 @@ class EntryManipulator:
         if not self.category.delete_entry(self.queried_entry):
             return
         self.enable_entries()
-        self.reset()
+        self.reset(True)
         self.btn_one.configure(state="active")
         self.btn_two.configure(state="disabled")
         self.btn_three.configure(state="disabled")
@@ -677,9 +1099,13 @@ class EntryManipulator:
         values = [e if type(e) is not str else e.strip() for e in values]
         if not self.category.add_entry(values):
             return
+        if self.keep_entries.get():
+            show_info("Entry successfully added")
         self.reset()
 
-    def reset(self):
+    def reset(self, always_delete: bool = False):
+        if self.keep_entries.get() and not always_delete:
+            return
         for i, element in enumerate(self.var_elements):
             element.set(self.default_values[i])
 
@@ -688,39 +1114,38 @@ class TableView:
     def __init__(self, category: Category):
         self.category = category
         self.master = Toplevel()
+        self.row_amount = 10
         self.master.title("View " + category.display_name)
         self.master.minsize(550, 400)
         self.master.focus_force()
 
-        query_result: list[list[Any]] = category.query_full_table()
-        if query_result is None:
+        self.query_result, next_page = category.query_first_page("Could not load first page for category",
+                                                                 self.row_amount)
+        if self.query_result is None:
             self.master.destroy()
 
         result: list[list[str]] = category.transform_last_full_query_into_string()
 
+        self.queries = [Entry(self.master) for _ in range(len(self.category.col_display_names))]
+        [item.grid(row=2, column=i, pady=(5, 10)) for i, item in enumerate(self.queries)]
 
-        def update_label(row: int, col_pos: int, increment: bool,
-                         widget_to_update: tkinter.Label) -> None:
-            column = query_result[row]
-            col_copy = query_result[row].copy()
-            if col_copy[col_pos] is None:
-                col_copy[col_pos] = 1 if increment else 0
-            else:
-                col_copy[col_pos] += 1 if increment else (-1 if col_copy[col_pos] > 0 else 0)
-            if not category.do_partial_update(column, col_copy[col_pos], col_pos):
-                return
-            widget_to_update.config(text=str(col_copy[col_pos]))
-            query_result[row] = col_copy
-
-        scroll = ScrollableFrame(self.master, max_height=300)
-        scroll.pack(fill="both", expand=True, padx=10, pady=10)
-
-        frame = SimpleTable(scroll.inner, [self.category.col_display_names] + result,
-                            category.incrementer_list, update_label)
-        frame.pack(side="top", fill="x")
+        frame = SimpleTable(self.master, [self.category.col_display_names] + result,
+                            category.incrementer_list, self.update_label)
+        frame.grid(row=3, column=0, columnspan=len(self.category.col_display_names))
         self.master.update_idletasks()
-        h = frame.winfo_height()
-        self.master.geometry(f"{frame.winfo_width() + 40}x{h if h < 1000 else 1000}")
+
+    def update_label(self, row: int, col_pos: int, increment: bool,
+                     widget_to_update: SelectableLabel) -> None:
+        column = self.query_result[row]
+        col_copy = self.query_result[row].copy()
+        if col_copy[col_pos] is None:
+            col_copy[col_pos] = 1 if increment else 0
+        else:
+            col_copy[col_pos] += 1 if increment else (-1 if col_copy[col_pos] > 0 else 0)
+        if not self.category.do_partial_update(column, col_copy[col_pos], col_pos):
+            return
+        widget_to_update.config(text=str(col_copy[col_pos]))
+        self.query_result[row] = col_copy
 
 
 class BaseInterface:
@@ -738,14 +1163,62 @@ class BaseInterface:
 
         self.master.mainloop()
 
+    def add_category(self, c: Category):
+        self.categories.append(c)
+
+    def delete_category(self, pos: int):
+        self.categories.pop(pos)
+
     def interface(self):
         def create_category() -> None:
-            CategoryCreator(self)
+            CategoryEditor(self)
 
-        EntryManipulator(self, self.categories[1])
-        #TableView(self.categories[1])
+        def open_view() -> None:
+            TableView(self.categories[0])
 
-        Button(self.master, text='Create New Category', command=create_category).grid(row=0, column=0)
+        def open_edit() -> None:
+            EntryManipulator(self, self.categories[0])
+
+        Button(self.master, text='Category Editor', command=create_category).grid(row=0, column=0)
+        Button(self.master, text='Open View', command=open_view).grid(row=1, column=0)
+        Button(self.master, text='Edit Category', command=open_edit).grid(row=1, column=1)
+
+
+# ------------------------------------
+# HTML Class Interactions and Variables
+# ------------------------------------
+
+
+class HTMLGenerator:
+    def __init__(self, base: BaseInterface, category_pos: int = None):
+        self.base = base
+        if category_pos is None:
+            self.generate_full_html()
+        self.generate_partial_html(category_pos)
+
+    def generate_full_html(self):
+        self.generate_header()
+        self.generate_category_overview()
+        for c in self.base.categories:
+            self.generate_category(c)
+        self.generate_footer()
+
+    def generate_partial_html(self, pos: int):
+        self.generate_header()
+        self.generate_category(self.base.categories[pos])
+        self.generate_footer()
+
+    def generate_header(self):
+        pass
+
+    def generate_category_overview(self):
+        pass
+
+    def generate_category(self, c: Category):
+        pass
+
+    def generate_footer(self):
+        pass
 
 
 def main():
