@@ -166,12 +166,29 @@ class CategoryColumn:
             cls.__TEXT_AREA: e.text_area
         } for e in columns}
 
-    def transform_string_for_search(self, in_str: str) -> Any:
+    def transform_string_for_search(self, in_str: str) -> str | bool | int | None | tuple[str, int | None]:
         if self.col_type == TableTypes.STRING:
             return in_str.strip()
         elif self.col_type == TableTypes.BOOLEAN:
             return in_str.strip().upper() in ["1", "YES", "TRUE"]
-        return format_string_to_number(in_str, self.decimal_digits)
+        elif self.col_type == TableTypes.INTEGER:
+            if any([in_str.startswith(val) for val in ["= ", "== ", "> ", "< ", "<= ", ">= ", "!= ", "<> "]]):
+                extra = in_str[:2].strip()
+                return extra, format_string_to_number(in_str[2:], self.decimal_digits)
+            return format_string_to_number(in_str, self.decimal_digits)
+        return None
+
+    def transform_personal_value_to_string(self, val: Any) -> str:
+        if self.col_type == TableTypes.STRING:
+            return val
+        elif self.col_type == TableTypes.BOOLEAN:
+            if val:
+                return "✅"
+            else:
+                return "❌"
+        elif self.col_type == TableTypes.INTEGER:
+            return format_number_trim(val, self.decimal_digits)
+        return ""
 
 
 
@@ -442,12 +459,13 @@ class Category:
         self.__local_stored_result = [list(e) for e in query_result]
         return self.__local_stored_result
 
-    def query_first_page(self, error_text:str=None, row_amount: int = 10) -> tuple[list[list] | None, bool]:
-        # Todo: implement search via the transformation in the CategoryColumn function
+    def query_first_page(self, error_text:str=None, row_amount: int = 10, queries: list=None) \
+            -> tuple[list[list] | None, bool]:
         cur = con.cursor()
-        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list} " \
-                  f"LIMIT {row_amount+1};"
-        query_result = cur.execute(command).fetchall()
+        where_clause, values = self._build_dynamic_where(queries)
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} {where_clause} " \
+                  f"ORDER BY {self.__col_sql_list} LIMIT {row_amount+1};"
+        query_result = cur.execute(command, values).fetchall()
         cur.close()
         if query_result is None:
             if error_text is not None:
@@ -455,14 +473,15 @@ class Category:
                 return None, False
             show_info("Table Query failed")
             return None, False
-        self.__local_stored_result = [list(e) for e in query_result][:row_amount]
         return self.__local_stored_result, len(query_result) == row_amount + 1
 
-    def query_all_other_pages(self, error_text:str=None, row_amount: int = 10) -> list[list[list]] | None:
+    def query_all_other_pages(self, error_text:str=None, row_amount: int = 10, queries: list=None) \
+            -> list[list[list]] | None:
         cur = con.cursor()
-        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} ORDER BY {self.__col_sql_list} " \
-                  f"OFFSET {row_amount};"
-        query_result = cur.execute(command).fetchall()
+        where_clause, values = self._build_dynamic_where(queries)
+        command = f"SELECT {self.__col_sql_list} FROM {self.db_name} {where_clause} " \
+                  f"ORDER BY {self.__col_sql_list} OFFSET {row_amount};"
+        query_result = cur.execute(command, values).fetchall()
         cur.close()
         if query_result is None:
             if error_text is not None:
@@ -472,30 +491,48 @@ class Category:
             return None
         pages = ((len(query_result) - 1) // row_amount) + 1
         result = [[list(e) for e in query_result[off*row_amount:(off+1)*row_amount]] for off in range(pages)]
-        [self.__local_stored_result.extend(e) for e in result]
         return result
 
-    def transform_last_full_query_into_string(self) -> list[list[str]]:
-        # Todo: This concept should be refined. Fully quarry is only used for HTML, the table is paginated.
-        return [self._transform_values(e) for e in self.__local_stored_result]
+    def transform_last_full_query_into_string(self, data: list[list[Any]]) -> list[list[str]]:
+        return [self._transform_values(e) for e in data]
+
+    def _build_dynamic_where(self, user_inputs: list[str] | None) -> tuple[str, list[Any]]:
+        if user_inputs is None:
+            return "", []
+        conditions = []
+        params = []
+
+        for col, raw_val, transformer in zip(self.db_column_names, user_inputs, self.columns):
+            if raw_val is None or raw_val.strip() == "":
+                continue
+            val = transformer.transform_string_for_search(raw_val)
+
+            if isinstance(val, tuple):
+                # Operator-based numeric search
+                op, num = val
+                if num is None:
+                    continue
+                conditions.append(f'{col} {op} ?')
+                params.append(num)
+            elif isinstance(val, (bool, int)):
+                # Boolean / numeric exact search
+                conditions.append(f'{col} = ?')
+                params.append(val)
+            elif isinstance(val, str):
+                # String search using LIKE
+                conditions.append(f"{col} LIKE ? ESCAPE '\\'")
+                params.append(f"%{val}%")
+            else:
+                conditions.append(f"{col} IS NULL")
+
+        if not conditions:
+            return "", []
+
+        where_clause = "WHERE " + " AND ".join(conditions)
+        return where_clause, params
 
     def _transform_values(self, data: list) -> list[str]:
-        res: list[str] = []
-
-        for i, val in enumerate(data):
-            cur_col_def = self.columns[i]
-
-            if cur_col_def.col_type == TableTypes.STRING:
-                res.append(val)
-            elif cur_col_def.col_type == TableTypes.BOOLEAN:
-                if val:
-                    res.append("✅")
-                else:
-                    res.append("❌")
-            elif cur_col_def.col_type == TableTypes.INTEGER:
-                res.append(format_number_trim(val, cur_col_def.decimal_digits))
-
-        return res
+        return [col.transform_personal_value_to_string(data[i]) for i, col in enumerate(self.columns)]
 
 
 #------------------------------------
@@ -1119,12 +1156,13 @@ class TableView:
         self.master.minsize(550, 400)
         self.master.focus_force()
 
+        # Todo: implement pagination
         self.query_result, next_page = category.query_first_page("Could not load first page for category",
                                                                  self.row_amount)
         if self.query_result is None:
             self.master.destroy()
 
-        result: list[list[str]] = category.transform_last_full_query_into_string()
+        result: list[list[str]] = category.transform_last_full_query_into_string(self.query_result)
 
         self.queries = [Entry(self.master) for _ in range(len(self.category.col_display_names))]
         [item.grid(row=2, column=i, pady=(5, 10)) for i, item in enumerate(self.queries)]
@@ -1133,6 +1171,9 @@ class TableView:
                             category.incrementer_list, self.update_label)
         frame.grid(row=3, column=0, columnspan=len(self.category.col_display_names))
         self.master.update_idletasks()
+
+    def get_queries_text(self) -> list[str]:
+        return [e.get() for e in self.queries]
 
     def update_label(self, row: int, col_pos: int, increment: bool,
                      widget_to_update: SelectableLabel) -> None:
