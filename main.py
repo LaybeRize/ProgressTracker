@@ -202,7 +202,6 @@ class Category:
         self.__base_full_update: str = ""
         self.__col_sql_list: str = ""
         self.primary_key_pos: list[int] = []
-        self.__local_stored_result: list[list[Any]] = []
         self.incrementer_list: list[bool] = []
         self.col_display_names: list[str] = []
         self.db_column_names: list[str] = []
@@ -456,8 +455,7 @@ class Category:
                 return None
             show_info("Table Query failed")
             return None
-        self.__local_stored_result = [list(e) for e in query_result]
-        return self.__local_stored_result
+        return [list(e) for e in query_result]
 
     def query_first_page(self, error_text:str=None, row_amount: int = 10, queries: list=None) \
             -> tuple[list[list] | None, bool]:
@@ -473,14 +471,14 @@ class Category:
                 return None, False
             show_info("Table Query failed")
             return None, False
-        return self.__local_stored_result, len(query_result) == row_amount + 1
+        return [list(e) for e in query_result[:row_amount]], len(query_result) == row_amount + 1
 
     def query_all_other_pages(self, error_text:str=None, row_amount: int = 10, queries: list=None) \
             -> list[list[list]] | None:
         cur = con.cursor()
         where_clause, values = self._build_dynamic_where(queries)
         command = f"SELECT {self.__col_sql_list} FROM {self.db_name} {where_clause} " \
-                  f"ORDER BY {self.__col_sql_list} OFFSET {row_amount};"
+                  f"ORDER BY {self.__col_sql_list} LIMIT -1 OFFSET {row_amount};"
         query_result = cur.execute(command, values).fetchall()
         cur.close()
         if query_result is None:
@@ -493,7 +491,7 @@ class Category:
         result = [[list(e) for e in query_result[off*row_amount:(off+1)*row_amount]] for off in range(pages)]
         return result
 
-    def transform_last_full_query_into_string(self, data: list[list[Any]]) -> list[list[str]]:
+    def transform_query_into_string(self, data: list[list[Any]]) -> list[list[str]]:
         return [self._transform_values(e) for e in data]
 
     def _build_dynamic_where(self, user_inputs: list[str] | None) -> tuple[str, list[Any]]:
@@ -665,45 +663,74 @@ class SimpleTable(Frame):
                  func: Callable[[int, int, bool, SelectableLabel], None], **kwargs):
         # use black background so it "peeks through" to
         # form grid lines
+        self._func = func
+        self._incrementer = incrementer
+        self._amount_rows = len(data)
+        self._width = len(incrementer)
         Frame.__init__(self, parent, background="black", **kwargs)
-        self._widgets = []
+        self._label_widget = []
+        self._row_widget = []
         for row in range(len(data)):
-            current_row = []
-            for column in range(len(incrementer)):
-                if incrementer[column] and row != 0:
-                    sub_frame = Frame(self, background="lightblue" if row == 0 else
-                                            ("white" if row % 2 == 1 else "light gray"), width="20")
-                    label = SelectableLabel(sub_frame, text=data[row][column],
-                                  borderwidth=0,
-                                  bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
-                                  wraplength="250", justify="left")
-                    label.grid(row=0, column=1, rowspan=2, padx=1)
-                    loc_row = row - 1
-                    loc_col = column
-                    Button(sub_frame, text="↑",
-                           command=partial(func,loc_row, loc_col, True, label)) \
-                        .grid(row=0, column=0)
-                    Button(sub_frame, text="↓",
-                           command=partial(func, loc_row, loc_col, False, label)) \
-                        .grid(row=1, column=0)
-                    sub_frame.grid_columnconfigure(0, weight=0, minsize=30)
-                    sub_frame.grid_columnconfigure(1, weight=1, minsize=250)
-                    sub_frame.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
-                else:
-                    label = SelectableLabel(self, text=data[row][column],
-                                  borderwidth=0,
-                                  bg="lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray"),
-                                  wraplength="250", justify="left")
-                    label.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
-                    current_row.append(label)
-            self._widgets.append(current_row)
+            self._add_row(row, data[row])
 
         for i, column in enumerate(incrementer):
             self.grid_columnconfigure(i, weight=1, minsize=280 if column else 250)
 
-    def set(self, row, column, value) -> None:
-        widget = self._widgets[row][column]
-        widget.configure(text=value)
+    @staticmethod
+    def _row_color(row: int) -> str:
+        return "lightblue" if row == 0 else ("white" if row % 2 == 1 else "light gray")
+
+    def set(self, row: int, column: int, value: str) -> None:
+        widget = self._label_widget[row][column]
+        widget.config(text=value)
+
+    def resize_table(self, new_amount_rows: int) -> None:
+        if new_amount_rows == self._amount_rows:
+            return
+
+        if new_amount_rows > self._amount_rows:
+            calc = new_amount_rows - self._amount_rows
+            data = [""] * len(self._incrementer)
+            for _ in range(calc):
+                self._add_row(self._amount_rows, data)
+                self._amount_rows += 1
+        else:
+            calc = self._amount_rows - new_amount_rows
+            self._amount_rows = new_amount_rows
+            for i in range(calc):
+                [e.destroy() for e in self._row_widget[-1-i]]
+            self._row_widget = self._row_widget[:self._amount_rows]
+            self._label_widget = self._label_widget[:self._amount_rows]
+
+    def _add_row(self, row: int, data: list) -> None:
+        current_row = []
+        current_row_main_element = []
+        for column in range(len(self._incrementer)):
+            if self._incrementer[column] and row != 0:
+                sub_frame = Frame(self, background=self._row_color(row), width="20")
+                label = SelectableLabel(sub_frame, text=data[column], borderwidth=0,
+                                        bg=self._row_color(row), wraplength="250", justify="left")
+                label.grid(row=0, column=1, rowspan=2, padx=1)
+                loc_row = row - 1
+                loc_col = column
+                Button(sub_frame, text="↑",
+                       command=partial(self._func, loc_row, loc_col, True, label)) \
+                    .grid(row=0, column=0)
+                Button(sub_frame, text="↓",
+                       command=partial(self._func, loc_row, loc_col, False, label)) \
+                    .grid(row=1, column=0)
+                sub_frame.grid_columnconfigure(0, weight=0, minsize=30)
+                sub_frame.grid_columnconfigure(1, weight=1, minsize=250)
+                sub_frame.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                current_row_main_element.append(sub_frame)
+            else:
+                label = SelectableLabel(self, text=data[column], borderwidth=0,
+                                        bg=self._row_color(row), wraplength="250", justify="left")
+                label.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                current_row_main_element.append(label)
+            current_row.append(label)
+        self._row_widget.append(current_row_main_element)
+        self._label_widget.append(current_row)
 
 
 class NumberEntry(Entry):
@@ -1152,25 +1179,88 @@ class TableView:
         self.category = category
         self.master = Toplevel()
         self.row_amount = 10
+        self.current_page = 1
         self.master.title("View " + category.display_name)
         self.master.minsize(550, 400)
         self.master.focus_force()
-
-        # Todo: implement pagination
-        self.query_result, next_page = category.query_first_page("Could not load first page for category",
-                                                                 self.row_amount)
-        if self.query_result is None:
-            self.master.destroy()
-
-        result: list[list[str]] = category.transform_last_full_query_into_string(self.query_result)
+        self.query_result: list[list[Any]] = []
+        self.pages: list[list[list[Any]]] = []
 
         self.queries = [Entry(self.master) for _ in range(len(self.category.col_display_names))]
         [item.grid(row=2, column=i, pady=(5, 10)) for i, item in enumerate(self.queries)]
-
-        frame = SimpleTable(self.master, [self.category.col_display_names] + result,
+        self.table = SimpleTable(self.master, [self.category.col_display_names],
                             category.incrementer_list, self.update_label)
-        frame.grid(row=3, column=0, columnspan=len(self.category.col_display_names))
+        self.table.grid(row=3, column=0, columnspan=len(self.category.col_display_names))
+        btn_frame = Frame(self.master)
+        self.btn_next = Button(btn_frame, text="→", command=self.next_page)
+        self.btn_next.grid(row=0, column=2, pady=(5,0))
+        self.btn_previous = Button(btn_frame, text="←", command=self.previous_page)
+        self.btn_previous.grid(row=0, column=0, pady=(5,0))
+        self.page_label = Label(btn_frame, text="1/?")
+        self.page_label.grid(row=0, column=1, pady=(5,0), padx=3)
+        btn_frame.grid(row=0,column=0, padx=(20,0), sticky=W)
+        self.btn_search = Button(self.master, text="Search", command=self.search_with_info)
+        self.btn_search.grid(row=1, column=0, pady=(5,0), padx=(20,0), sticky=W)
+
+        self.query_first_page()
         self.master.update_idletasks()
+
+    def next_page(self):
+        if self.current_page >= len(self.pages):
+            return
+        self.pages[self.current_page-1] = self.query_result.copy()
+        self.current_page += 1
+        self.query_result = self.pages[self.current_page-1].copy()
+        self.update_rows()
+
+        if self.current_page > 1:
+            self.btn_previous.config(state="active")
+        if self.current_page >= len(self.pages):
+            self.btn_next.config(state="disabled")
+        self.page_label.configure(text=f"{self.current_page}/{len(self.pages)}")
+
+    def previous_page(self):
+        if self.current_page < 2:
+            return
+        self.pages[self.current_page-1] = self.query_result.copy()
+        self.current_page -= 1
+        self.query_result = self.pages[self.current_page-1].copy()
+        self.update_rows()
+
+        if self.current_page < 2:
+            self.btn_previous.config(state="disabled")
+        if self.current_page < len(self.pages):
+            self.btn_next.config(state="active")
+        self.page_label.configure(text=f"{self.current_page}/{len(self.pages)}")
+
+    def update_rows(self):
+        self.table.resize_table(1+len(self.query_result))
+        for row, row_data in enumerate(self.category.transform_query_into_string(self.query_result)):
+            for col, data in enumerate(row_data):
+                self.table.set(row + 1, col, data)
+
+
+    def search_with_info(self):
+        self.query_first_page()
+
+    def query_first_page(self):
+        self.pages = []
+        self.current_page = 1
+        self.btn_previous.config(state="disabled")
+        self.query_result, next_page = self.category.query_first_page("Could not load first page for category",
+                                                                      self.row_amount, self.get_queries_text())
+        self.btn_next.config(state="active" if next_page else "disabled")
+        if self.query_result is None:
+            self.master.destroy()
+        self.update_rows()
+        self.pages.append(self.query_result)
+        other_pages = self.category.query_all_other_pages("Could not load rest of pages for category",
+                                                          self.row_amount, self.get_queries_text())
+        if self.query_result is None:
+            self.master.destroy()
+        for entry in other_pages:
+            self.pages.append(entry)
+        self.page_label.configure(text=f"{self.current_page}/{len(self.pages)}")
 
     def get_queries_text(self) -> list[str]:
         return [e.get() for e in self.queries]
