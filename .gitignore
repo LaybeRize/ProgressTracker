@@ -1,5 +1,6 @@
 data.sqlite
 .idea
-.venv
 test.py
+venv
+tmp
 data.html
