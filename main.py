@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import html
 import re
 import sqlite3
 from tkinter import *
@@ -615,11 +616,7 @@ class ScrollableFrame(Frame):
 
         self.inner = Frame(self.canvas)
 
-        self.window_id = self.canvas.create_window(
-            (0, 0),
-            window=self.inner,
-            anchor="nw"
-        )
+        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
 
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
@@ -641,6 +638,11 @@ class ScrollableFrame(Frame):
         self.canvas.unbind_all("<MouseWheel>")
         self.canvas.unbind_all("<Button-4>")
         self.canvas.unbind_all("<Button-5>")
+
+    def bind_scroll(self):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
 
     def _on_frame_configure(self, _=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -778,7 +780,7 @@ class NumberEntry(Entry):
 class CategoryEditor:
     def __init__(self, base:BaseInterface):
         self.base = base
-        base.master.withdraw()
+        base.hide()
         self.options = [TableTypes.STRING, TableTypes.INTEGER, TableTypes.BOOLEAN]
 
         self.master = Toplevel()
@@ -819,11 +821,10 @@ class CategoryEditor:
 
     def destroy(self):
         self.outer.unbind_scroll()
-        self.base.master.deiconify()
+        self.base.show()
         self.master.destroy()
 
     def refresh_layout(self):
-        """Repack groups based on their order in the list."""
         for g in self.groups:
             g["frame"].pack_forget()
 
@@ -1022,7 +1023,7 @@ class EntryManipulator:
     def __init__(self, base: BaseInterface, category: Category):
         self.base = base
         self.category = category
-        base.master.withdraw()
+        base.hide()
 
         self.master = Toplevel()
         self.master.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -1155,7 +1156,7 @@ class EntryManipulator:
         [entry.config(state="normal") for entry in self.elements]
 
     def destroy(self):
-        self.base.master.deiconify()
+        self.base.show()
         self.master.destroy()
 
     def add_to_db(self):
@@ -1239,7 +1240,6 @@ class TableView:
             for col, data in enumerate(row_data):
                 self.table.set(row + 1, col, data)
 
-
     def search_with_info(self):
         self.query_first_page()
 
@@ -1289,43 +1289,150 @@ class BaseInterface:
         default_font.configure(size=14)
         self.master.option_add("*Font", default_font)
 
+        self.groups = []
+        self.outer = ScrollableFrame(self.master)
+        self.scroll_frame = self.outer.inner
         self.categories = Category.load_categories_from_db()
         self.interface()
-
+        for i in range(len(self.categories)):
+            self.add_group(i)
         self.master.mainloop()
+
+    def hide(self):
+        self.outer.unbind_scroll()
+        self.master.withdraw()
+
+    def show(self):
+        self.master.deiconify()
+        self.outer.bind_scroll()
 
     def add_category(self, c: Category):
         self.categories.append(c)
+        self.add_group(-1)
 
     def delete_category(self, pos: int):
         self.categories.pop(pos)
+        self.delete_group(pos)
+
+    def add_group(self, pos: int):
+        cat = self.categories[pos]
+        frame = LabelFrame(self.scroll_frame, text=cat.display_name, relief="groove", pady=5, padx=5)
+
+        Button(frame, text='Edit Category', command=partial(self.open_edit, cat)).grid(row=0, column=0)
+        Button(frame, text='Open View', command=partial(self.open_view, cat)).grid(row=0, column=1, padx=5)
+        Button(frame, text='Create HTML', command=partial(self.create_html, cat)).grid(row=0, column=2)
+
+        self.groups.append(frame)
+        self.refresh_layout()
+
+    def delete_group(self, group_pos: int):
+        self.groups[group_pos].destroy()
+        self.groups.pop(group_pos)
+        self.refresh_layout()
+
+    def refresh_layout(self):
+        for g in self.groups:
+            g.pack_forget()
+
+        for g in self.groups:
+            g.pack(fill="x", pady=5, padx=5)
 
     def interface(self):
-        def create_category() -> None:
-            CategoryEditor(self)
+        category_info = Frame(self.master)
+        category_info.pack(fill="x")
 
-        def open_view() -> None:
-            TableView(self.categories[0])
+        Button(category_info, text='Category Editor', command=lambda: CategoryEditor(self)) \
+            .grid(row=0, column=0, padx=(5,0), pady=5)
+        Button(category_info, text='Create HTML for all', command=lambda: HTMLGenerator(self)) \
+            .grid(row=0, column=1, padx=5)
+        Button(category_info, text='Save to DB', command=lambda: update_disk_db(False)) \
+            .grid(row=0, column=2)
+        self.outer.pack(fill="both", expand=True)
 
-        def open_edit() -> None:
-            EntryManipulator(self, self.categories[0])
+    @staticmethod
+    def open_view(cat: Category) -> None:
+        TableView(cat)
 
-        Button(self.master, text='Category Editor', command=create_category).grid(row=0, column=0)
-        Button(self.master, text='Open View', command=open_view).grid(row=1, column=0)
-        Button(self.master, text='Edit Category', command=open_edit).grid(row=1, column=1)
+    def open_edit(self, cat: Category) -> None:
+        EntryManipulator(self, cat)
+
+    def create_html(self, cat: Category) -> None:
+        HTMLGenerator(self, cat)
 
 
 # ------------------------------------
 # HTML Class Interactions and Variables
 # ------------------------------------
 
+CSS = '''
+.data-table {
+  margin: 0 auto;
+  max-width: max(1000px, 75vw);
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid #000;
+  padding: 8px 12px;
+  vertical-align: top;
+
+  /* allow wrapping instead of expanding */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* max cell width = 2 * average column width */
+.data-table td,
+.data-table th {
+  min-width: calc(50cqw / var(--cols));
+  max-width: calc(200cqw / var(--cols));
+}
+
+/* header */
+.data-table thead th {
+  background: #dbeeff; /* light blue */
+  font-weight: bold;
+}
+
+/* alternating row colors */
+.data-table tbody tr:nth-child(odd) {
+  background: #ffffff;
+}
+
+.data-table tbody tr:nth-child(even) {
+  background: #f2f2f2; /* light gray */
+}
+
+h1 {
+  text-align: center;
+}
+
+.links {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+}
+
+a {
+  margin: 0.3em;
+}
+'''
 
 class HTMLGenerator:
-    def __init__(self, base: BaseInterface, category_pos: int = None):
+    def __init__(self, base: BaseInterface, category: Category = None):
         self.base = base
-        if category_pos is None:
+        self.file = open("./data.html", "w", encoding="UTF-8")
+        self.title = "Complete Overview"
+        if category is None:
             self.generate_full_html()
-        self.generate_partial_html(category_pos)
+            self.file.close()
+            return
+        self.generate_partial_html(category)
+        self.file.close()
 
     def generate_full_html(self):
         self.generate_header()
@@ -1334,22 +1441,46 @@ class HTMLGenerator:
             self.generate_category(c)
         self.generate_footer()
 
-    def generate_partial_html(self, pos: int):
+    def generate_partial_html(self, cat: Category):
+        self.title = f"Overview for {cat.display_name}"
         self.generate_header()
-        self.generate_category(self.base.categories[pos])
+        self.generate_category(cat)
         self.generate_footer()
 
     def generate_header(self):
+        self.file.write('<!DOCTYPE html><html lang="en"><head>'
+                        '<meta charset="UTF-8">'
+                        f'<title>{html.escape(self.title)}</title>'
+                        f'<style>{CSS}</style>'
+                        '</head><body>')
         pass
 
     def generate_category_overview(self):
-        pass
+        self.file.write('<div id="head_" class="links">')
+        for c in self.base.categories:
+            self.file.write(f'<a href="#{c.db_name}">Jump to {html.escape(c.display_name)}</a>')
+        self.file.write('</div>')
 
     def generate_category(self, c: Category):
-        pass
+        data = c.query_full_table(f"Failed to retrieve data for category '{html.escape(c.display_name)}'")
+        if data is None:
+            return
+        data = c.transform_query_into_string(data)
+        self.file.write(f'<h1 id="{c.db_name}">{html.escape(c.display_name)} <a href="#head_">[Go back]</a></h1>'
+                        f'<table class="data-table" style="--cols: {len(c.columns)}">'
+                        '<thead><tr>')
+        for col_name in c.col_display_names:
+            self.file.write(f'<th>{html.escape(col_name)}</th>')
+        self.file.write('</tr></thead>')
+        for row in data:
+            self.file.write('<tr>')
+            for text in row:
+                self.file.write(f'<td>{html.escape(text)}</td>')
+            self.file.write('</tr>')
+        self.file.write('</tbody></table>')
 
     def generate_footer(self):
-        pass
+        self.file.write('</body></html>')
 
 
 def main():
