@@ -11,7 +11,6 @@ import zipfile
 from tkinter import *
 import tkinter.font as tk_font
 import tkinter.messagebox
-from traceback import print_tb
 from typing import Final, Callable, Any
 from tkinter.scrolledtext import ScrolledText as TKScrollText
 from functools import partial
@@ -256,6 +255,34 @@ class Category:
         self.db_column_names = [col.col_name for col in self.columns]
 
         return update
+
+    def get_default_row(self) -> list[Any]:
+        result = []
+        for c in self.columns:
+            if TableTypes.STRING == c.col_type:
+                result.append("")
+            elif TableTypes.BOOLEAN == c.col_type:
+                result.append(False)
+            else:
+                result.append(None)
+        return result
+
+    def column_position(self, disp_name: str | list[str], col_type: str,
+                              decimal_digits: int | None = None) -> int:
+        if type(disp_name) is list:
+            disp_names = [e.upper() for e in disp_name]
+        else:
+            disp_names = [disp_name.upper()]
+        for pos, col in enumerate(self.columns):
+            if col.display_name.upper() in disp_names and col.col_type == col_type and \
+                    (decimal_digits is None or decimal_digits == col.decimal_digits):
+                return pos
+        return -1
+
+    def has_column_definition(self, disp_name: str | list[str], col_type: str,
+                              decimal_digits: int | None = None) -> bool:
+        return self.column_position(disp_name, col_type, decimal_digits) != -1
+
 
     def add_category(self) -> bool:
         self._transform_text()
@@ -1501,12 +1528,17 @@ class HTMLGenerator:
         for col_name in c.col_display_names:
             self.file.write(f'<th>{html.escape(col_name)}</th>')
         self.file.write('</tr></thead>')
+
+        regex = re.compile(r"https?://[^\s\"]+", flags=re.MULTILINE | re.UNICODE)
+
+        def replace_link(m: re.Match[str]) -> str:
+            return f'<a href="{html.unescape(m.group())}">{m.group()}</a>'
+
         for row in data:
             self.file.write('<tr>')
             for text in row:
                 text = html.escape(text)
-                # Todo: add an <a href></> tag around links that are detected
-                self.file.write(f'<td>{text}</td>')
+                self.file.write(f'<td>{regex.sub(replace_link, text)}</td>')
             self.file.write('</tr>')
         self.file.write('</tbody></table>')
 
@@ -1530,15 +1562,38 @@ class MyAnimeList:
         print(self.data)
 
     def _get_category(self, category_name: str) -> Category | None:
-        cat = self.base.get_category(category_name)
-        if cat is not None:
-
-            return cat
-        cat = Category()
-        cat.display_name = category_name
-        cat.db_name = db_name(category_name)
-
-        return cat
+        # Todo: finish this class properly
+        category = self.base.get_category(category_name)
+        if category is not None:
+            if category.has_column_definition(["ANIMEDB ID", "ANIMEDB", "ANIMEDBID", "ANIMEID", "ANIME ID"],
+                                              TableTypes.STRING) and \
+                    category.has_column_definition(["SERIES TITLE", "SERIES", "TITLE"],
+                                                   TableTypes.INTEGER, 0) and \
+                    category.has_column_definition("WATCHED", TableTypes.BOOLEAN):
+                return category
+            return None
+        category = Category()
+        category.display_name = category_name
+        category.db_name = db_name(category_name)
+        category.columns = [CategoryColumn("Date", "Date", False,
+                                           TableTypes.STRING, 0, False, False),
+                            CategoryColumn("Name", "Name", True,
+                                           TableTypes.STRING, 0, False, False),
+                            CategoryColumn("Year", "Year", True,
+                                           TableTypes.INTEGER, 0, False, False),
+                            CategoryColumn("Letterboxd_URI", "Letterboxd URI", False,
+                                           TableTypes.STRING, 0, False, True),
+                            CategoryColumn("Watched", "Watched", False,
+                                           TableTypes.BOOLEAN, 0, False, True),
+                            CategoryColumn("Watched", "Watched", False,
+                                           TableTypes.BOOLEAN, 0, False, True),
+                            CategoryColumn("Watched", "Watched", False,
+                                           TableTypes.BOOLEAN, 0, False, True),
+                            ]
+        if not category.add_category():
+            return None
+        self.base.add_category(category)
+        return category
 
     @staticmethod
     def _get_data(file_path: str) -> list[dict[str, str]]:
@@ -1562,19 +1617,55 @@ class LetterBoxd:
         if self.category is None:
             show_error("Could not create category or category with name isn't suitable for updates")
             return
-        self.data = self._get_data(zip_archive_path)
-        print(self.data)
+        self.positions: dict[int, int] = self._get_col_positions()
+        self.base_row: list[Any] = self.category.get_default_row()
+        try:
+            self.data = self._get_data(zip_archive_path)
+        except Exception as err:
+            show_error(f"Could not extract valid data from the given ZIP archive:\n{err}")
+            return
+        self._upsert_data()
 
     def _get_category(self, category_name: str) -> Category | None:
-        cat = self.base.get_category(category_name)
-        if cat is not None:
+        category = self.base.get_category(category_name)
+        if category is not None:
+            if category.has_column_definition(["NAME", "TITLE"], TableTypes.STRING) and \
+                category.has_column_definition(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0) and \
+                category.has_column_definition("WATCHED", TableTypes.BOOLEAN):
+                return category
+            return None
+        category = Category()
+        category.display_name = category_name
+        category.db_name = db_name(category_name)
+        category.columns = [CategoryColumn("Date", "Date", False,
+                                      TableTypes.STRING, 0, False, False),
+                       CategoryColumn("Name", "Name", True,
+                                      TableTypes.STRING, 0, False, False),
+                       CategoryColumn("Year", "Year", True,
+                                      TableTypes.INTEGER, 0, False, False),
+                       CategoryColumn("Letterboxd_URI", "Letterboxd URI", False,
+                                      TableTypes.STRING, 0, False, True),
+                       CategoryColumn("Watched", "Watched", False,
+                                      TableTypes.BOOLEAN, 0, False, True),
+                       ]
+        if not category.add_category():
+            return None
+        self.base.add_category(category)
+        return category
 
-            return cat
-        cat = Category()
-        cat.display_name = category_name
-        cat.db_name = db_name(category_name)
-
-        return cat
+    def _get_col_positions(self) -> dict[int, int]:
+        result = {
+            0: self.category.column_position("DATE", TableTypes.STRING),
+            1: self.category.column_position(["NAME", "TITLE"], TableTypes.STRING),
+            2: self.category.column_position(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0),
+            3: self.category.column_position(["LETTERBOXD URI", "LETTERBOXD URL", "LETTERBOXD"],
+                                             TableTypes.STRING),
+            4: self.category.column_position("WATCHED", TableTypes.BOOLEAN),
+        }
+        for key, value in result.items():
+            if value == -1:
+                result.pop(key)
+        return result
 
     @staticmethod
     def _get_data(zip_archive_path: str) -> list[list[Any]]:
@@ -1582,10 +1673,10 @@ class LetterBoxd:
         result: list[list] = [["Date"], ["Name"], ["Year"], ["Letterboxd URI"]]
         watched = [list(e) for e in
                    zip(*[data for data in csv.reader(io.TextIOWrapper(archive.open("watched.csv", "r"),
-                                                     encoding="UTF-8"), "letterboxd")])]
+                                                     encoding="UTF-8"), "letterboxd")], strict=True)]
         planned = [list(e) for e in
                    zip(*[data for data in csv.reader(io.TextIOWrapper(archive.open("watchlist.csv", "r"),
-                                                     encoding="UTF-8"), "letterboxd")])]
+                                                     encoding="UTF-8"), "letterboxd")], strict=True)]
         for pos, (col, *_) in enumerate(result.copy()):
             result[pos] = []
             for item_list in watched:
@@ -1603,7 +1694,14 @@ class LetterBoxd:
 
         result[-1].extend([False] * amt)
 
-        return [[date, name, int(year), uri, watch] for (date, name, year, uri, watch) in zip(*result)]
+        return [[date, name, int(year), uri, watch] for (date, name, year, uri, watch) in zip(*result, strict=True)]
+
+    def _upsert_data(self):
+        for row in self.data:
+            for key, value in self.positions:
+                self.base_row[value] = row[key]
+            if not self.category.upsert_entry(self.base_row):
+                return
 
 
 # ------------------------------------
