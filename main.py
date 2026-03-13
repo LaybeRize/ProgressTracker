@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import atexit
+import csv
 import html
+import io
 import re
 import sqlite3
+import xml
+import zipfile
 from tkinter import *
 import tkinter.font as tk_font
 import tkinter.messagebox
+from traceback import print_tb
 from typing import Final, Callable, Any
 from tkinter.scrolledtext import ScrolledText as TKScrollText
 from functools import partial
@@ -206,6 +211,7 @@ class Category:
         self.incrementer_list: list[bool] = []
         self.col_display_names: list[str] = []
         self.db_column_names: list[str] = []
+        self.db_primary_columns: list[str] = []
 
         # DB Col-Name to (Display Name, Primary key, Type, Decimal Digits, Incrementer, TextArea)
         self.columns: list[CategoryColumn] = []
@@ -241,6 +247,7 @@ class Category:
         # helpful values that might be used internally or externally
         prim_key = [(col.col_name, pos) for pos, col in enumerate(self.columns) if col.is_primary_key]
         self.primary_key_pos = [pos for _, pos in prim_key]
+        self.db_primary_columns = [key for key, _ in prim_key]
         self.__primary_key_statement = " AND ".join([f"{key} = ?" for key, _ in prim_key])
         self.__base_full_update = ", ".join([f"{col.col_name} = ?" for col in self.columns])
         self.__col_sql_list = ", ".join([col.col_name for col in self.columns])
@@ -432,6 +439,22 @@ class Category:
             commit(cur)
         except sqlite3.Error as err:
             rollback(cur, f"Failed to insert new entry:\n{err}")
+            return False
+        return True
+
+    def upsert_entry(self, values: list) -> bool:
+        col_names = ", ".join(self.db_column_names)
+        question_marks = ", ".join(["?"] * len(self.db_column_names))
+        primary_keys = ", ".join(self.db_primary_columns)
+        values = values, values + [values[i] for i in self.primary_key_pos]
+        command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks}) ON CONFLICT" + \
+                  f"({primary_keys}) DO UPDATE SET {self.__base_full_update} WHERE {self.__primary_key_statement};"
+        cur = open_cursor()
+        try:
+            cur.execute(command, values)
+            commit(cur)
+        except sqlite3.Error as err:
+            rollback(cur, f"Failed to upsert entry:\n{err}")
             return False
         return True
 
@@ -1298,6 +1321,12 @@ class BaseInterface:
             self.add_group(i)
         self.master.mainloop()
 
+    def get_category(self, disp_name: str) -> Category | None:
+        for cat in self.categories:
+            if cat.display_name == disp_name:
+                return cat
+        return None
+
     def hide(self):
         self.outer.unbind_scroll()
         self.master.withdraw()
@@ -1475,7 +1504,9 @@ class HTMLGenerator:
         for row in data:
             self.file.write('<tr>')
             for text in row:
-                self.file.write(f'<td>{html.escape(text)}</td>')
+                text = html.escape(text)
+                # Todo: add an <a href></> tag around links that are detected
+                self.file.write(f'<td>{text}</td>')
             self.file.write('</tr>')
         self.file.write('</tbody></table>')
 
@@ -1483,9 +1514,105 @@ class HTMLGenerator:
         self.file.write('</body></html>')
 
 
+# ------------------------------------
+# Importer
+# ------------------------------------
+
+
+class MyAnimeList:
+    def __init__(self, base: BaseInterface, category_name: str, file_path: str):
+        self.base = base
+        self.category = self._get_category(category_name)
+        if self.category is None:
+            show_error("Could not create category or category with name isn't suitable for updates")
+            return
+        self.data = self._get_data(file_path)
+        print(self.data)
+
+    def _get_category(self, category_name: str) -> Category | None:
+        cat = self.base.get_category(category_name)
+        if cat is not None:
+
+            return cat
+        cat = Category()
+        cat.display_name = category_name
+        cat.db_name = db_name(category_name)
+
+        return cat
+
+    @staticmethod
+    def _get_data(file_path: str) -> list[dict[str, str]]:
+        anime_list = []
+        root = xml.etree.ElementTree.parse(file_path)
+        for anime in root.findall("anime"):
+            entry = {}
+            for child in anime:
+                entry[child.tag] = child.text if child.text is not None else ""
+            anime_list.append(entry)
+        return anime_list
+
+
+csv.register_dialect("letterboxd", delimiter=",", lineterminator="\n", quoting=csv.QUOTE_MINIMAL, strict=True)
+
+
+class LetterBoxd:
+    def __init__(self, base: BaseInterface, category_name: str, zip_archive_path: str):
+        self.base = base
+        self.category = self._get_category(category_name)
+        if self.category is None:
+            show_error("Could not create category or category with name isn't suitable for updates")
+            return
+        self.data = self._get_data(zip_archive_path)
+        print(self.data)
+
+    def _get_category(self, category_name: str) -> Category | None:
+        cat = self.base.get_category(category_name)
+        if cat is not None:
+
+            return cat
+        cat = Category()
+        cat.display_name = category_name
+        cat.db_name = db_name(category_name)
+
+        return cat
+
+    @staticmethod
+    def _get_data(zip_archive_path: str) -> list[list[Any]]:
+        archive = zipfile.ZipFile(zip_archive_path, "r")
+        result: list[list] = [["Date"], ["Name"], ["Year"], ["Letterboxd URI"]]
+        watched = [list(e) for e in
+                   zip(*[data for data in csv.reader(io.TextIOWrapper(archive.open("watched.csv", "r"),
+                                                     encoding="UTF-8"), "letterboxd")])]
+        planned = [list(e) for e in
+                   zip(*[data for data in csv.reader(io.TextIOWrapper(archive.open("watchlist.csv", "r"),
+                                                     encoding="UTF-8"), "letterboxd")])]
+        for pos, (col, *_) in enumerate(result.copy()):
+            result[pos] = []
+            for item_list in watched:
+                if len(item_list) > 0 and item_list[0] == col:
+                    result[pos] = item_list[1:]
+
+        result.append([True] * len(result[0]))
+
+        amt = 0
+        for pos, (col, *_) in enumerate(result.copy()):
+            for item_list in planned:
+                if len(item_list) > 0 and item_list[0] == col:
+                    result[pos].extend(item_list[1:])
+                    amt = len(item_list) - 1
+
+        result[-1].extend([False] * amt)
+
+        return [[date, name, int(year), uri, watch] for (date, name, year, uri, watch) in zip(*result)]
+
+
+# ------------------------------------
+# MAIN
+# ------------------------------------
+
+
 def main():
     BaseInterface()
-
 
 if __name__ == '__main__':
     main()

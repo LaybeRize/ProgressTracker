@@ -12,3 +12,5 @@ be edited and viewed.
 Categories can be amended, meaning columns can be deleted or
 added.   
 Every table needs at least one primary key, this will be checked when the user tries to create a category.
+
+Allows the user to import a MyAnimeList style XML and a LetterBoxd exported ZIP file.

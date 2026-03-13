@@ -46,11 +46,12 @@ type tmp\stdout.txt
 
 :show_stderr
 for /f %%i in ("tmp\stderr.txt") do set size=%%~zi
-if %size% equ 0 goto :show_stderr
+if %size% equ 0 goto :exit_with_err
 echo.
 echo stderr:
 type tmp\stderr.txt
 
+:exit_with_err
 echo.
 echo Launch unsuccessful. Exiting.
 pause
