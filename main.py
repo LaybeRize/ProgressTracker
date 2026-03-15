@@ -1554,57 +1554,146 @@ class HTMLGenerator:
 class MyAnimeList:
     def __init__(self, base: BaseInterface, category_name: str, file_path: str):
         self.base = base
+        self.positions: dict[int, int] = {}
         self.category = self._get_category(category_name)
         if self.category is None:
             show_error("Could not create category or category with name isn't suitable for updates")
             return
-        self.data = self._get_data(file_path)
-        print(self.data)
+        self.base_row: list[Any] = self.category.get_default_row()
+        try:
+            self.data = self._get_data(file_path)
+        except Exception as err:
+            show_error(f"Could not extract valid data from the given ZIP archive:\n{err}")
+            return
+        self._upsert_data()
 
     def _get_category(self, category_name: str) -> Category | None:
-        # Todo: finish this class properly
         category = self.base.get_category(category_name)
         if category is not None:
             if category.has_column_definition(["ANIMEDB ID", "ANIMEDB", "ANIMEDBID", "ANIMEID", "ANIME ID"],
                                               TableTypes.STRING) and \
                     category.has_column_definition(["SERIES TITLE", "SERIES", "TITLE"],
-                                                   TableTypes.INTEGER, 0) and \
-                    category.has_column_definition("WATCHED", TableTypes.BOOLEAN):
+                                                   TableTypes.STRING) and \
+                    category.has_column_definition("EPISODES", TableTypes.INTEGER, 0) and \
+                    category.has_column_definition(["EPISODES WATCHED", "WATCHED EPISODES"], TableTypes.INTEGER, 0):
+                self.positions = self._get_col_positions()
                 return category
             return None
         category = Category()
         category.display_name = category_name
         category.db_name = db_name(category_name)
-        category.columns = [CategoryColumn("Date", "Date", False,
-                                           TableTypes.STRING, 0, False, False),
-                            CategoryColumn("Name", "Name", True,
-                                           TableTypes.STRING, 0, False, False),
-                            CategoryColumn("Year", "Year", True,
-                                           TableTypes.INTEGER, 0, False, False),
-                            CategoryColumn("Letterboxd_URI", "Letterboxd URI", False,
-                                           TableTypes.STRING, 0, False, True),
-                            CategoryColumn("Watched", "Watched", False,
-                                           TableTypes.BOOLEAN, 0, False, True),
-                            CategoryColumn("Watched", "Watched", False,
-                                           TableTypes.BOOLEAN, 0, False, True),
-                            CategoryColumn("Watched", "Watched", False,
-                                           TableTypes.BOOLEAN, 0, False, True),
+        category.columns = [CategoryColumn("AnimeDB ID", "AnimeDB_ID", True,
+                                           TableTypes.STRING, 0, False, False), # 1
+                            CategoryColumn("Series Title", "Series_Title", False,
+                                           TableTypes.STRING, 0, False, True), # 2
+                            CategoryColumn("Type", "Type", False,
+                                           TableTypes.STRING, 0, False, False), # 3
+                            CategoryColumn("Episodes", "Episodes", False,
+                                           TableTypes.INTEGER, 0, False, False), # 4
+                            CategoryColumn("My ID", "My_ID", False,
+                                           TableTypes.STRING, 0, False, False), # 5
+                            CategoryColumn("Episodes Watched", "Episodes_Watched", False,
+                                           TableTypes.INTEGER, 0, True, False), # 6
+                            CategoryColumn("Start Date", "start_date", False,
+                                           TableTypes.STRING, 0, False, False), # 7
+                            CategoryColumn("Finish Date", "finish_date", False,
+                                           TableTypes.STRING, 0, False, False), # 8
+                            CategoryColumn("My Rating", "my_rating", False,
+                                           TableTypes.STRING, 0, False, False), # 9
+                            CategoryColumn("My Score", "my_score", False,
+                                           TableTypes.STRING, 0, False, False), # 10
+                            CategoryColumn("DVD", "dvd", False,
+                                           TableTypes.STRING, 0, False, False), # 11
+                            CategoryColumn("My Storage", "my_storage", False,
+                                           TableTypes.STRING, 0, False, False), # 12
+                            CategoryColumn("Status", "status", False,
+                                           TableTypes.STRING, 0, False, False), # 13
+                            CategoryColumn("Comment", "comment", False,
+                                           TableTypes.STRING, 0, False, True), # 14
+                            CategoryColumn("Times Watched", "times_watched", False,
+                                           TableTypes.INTEGER, 0, True, False), # 15
+                            CategoryColumn("Rewatch Value", "rewatch_value", False,
+                                           TableTypes.STRING, 0, False, False), # 16
+                            CategoryColumn("Tags", "tags", False,
+                                           TableTypes.STRING, 0, False, True), # 17
+                            CategoryColumn("Rewatching", "rewatching", False,
+                                           TableTypes.BOOLEAN, 0, True, False), # 18
+                            CategoryColumn("Episodes Rewatching", "episodes_rewatching", False,
+                                           TableTypes.INTEGER, 0, True, False), # 19
                             ]
+        self.positions = {i: i for i in range(len(category.columns))}
         if not category.add_category():
             return None
         self.base.add_category(category)
         return category
 
+    def _get_col_positions(self) -> dict[int, int]:
+        result = {
+            0: self.category.column_position(["ANIMEDB ID", "ANIMEDB", "ANIMEDBID", "ANIMEID", "ANIME ID"],
+                                             TableTypes.STRING),
+            1: self.category.column_position(["SERIES TITLE", "SERIES", "TITLE"], TableTypes.STRING),
+            # Todo finish this
+            2: self.category.column_position(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0),
+            3: self.category.column_position(["LETTERBOXD URI", "LETTERBOXD URL", "LETTERBOXD"],
+                                             TableTypes.STRING),
+            4: self.category.column_position("WATCHED", TableTypes.BOOLEAN),
+        }
+        for key, value in result.items():
+            if value == -1:
+                result.pop(key)
+        return result
+
     @staticmethod
-    def _get_data(file_path: str) -> list[dict[str, str]]:
-        anime_list = []
+    def _get_data(file_path: str) -> list[list[Any]]:
+        def to_int(x: str) -> int | None:
+            try:
+                return int(x)
+            except ValueError:
+                return None
+
+        def to_bool(x: str) -> bool:
+            return x.upper().strip() in ["1", "TRUE"]
+
+        row_position: dict[str, tuple[int, Callable[[str],Any]]] = {
+            "series_animedb_id": (0, lambda x: x),
+            "series_title": (1, lambda x: x),
+            "series_type": (2, lambda x: x),
+            "series_episodes": (3, to_int),
+            "my_id": (4, lambda x: x),
+            "my_watched_episodes": (5, to_int),
+            "my_start_date": (6, lambda x: x),
+            "my_finish_date": (7, lambda x: x),
+            "my_rated": (8, lambda x: x),
+            "my_score": (9, lambda x: x),
+            "my_dvd": (10, lambda x: x),
+            "my_storage": (11, lambda x: x),
+            "my_status": (12, lambda x: x),
+            "my_comments": (13, lambda x: x),
+            "my_times_watched": (14, to_int),
+            "my_rewatch_value": (15, lambda x: x),
+            "my_tags": (16, lambda x: x),
+            "my_rewatching": (17, to_bool),
+            "my_rewatching_ep": (18, to_int),
+        }
+        anime_list: list[list[str]] = []
+        base_empty = [func("") for _, func in row_position.values()]
+
         root = xml.etree.ElementTree.parse(file_path)
         for anime in root.findall("anime"):
-            entry = {}
+            entry = base_empty.copy()
             for child in anime:
-                entry[child.tag] = child.text if child.text is not None else ""
+                if child.tag in row_position:
+                    pos, func = row_position[child.tag]
+                    entry[pos] = func(child.text if child.text is not None else "")
             anime_list.append(entry)
         return anime_list
+
+    def _upsert_data(self):
+        for row in self.data:
+            for key, value in self.positions:
+                self.base_row[value] = row[key]
+            if not self.category.upsert_entry(self.base_row):
+                return
 
 
 csv.register_dialect("letterboxd", delimiter=",", lineterminator="\n", quoting=csv.QUOTE_MINIMAL, strict=True)
@@ -1613,11 +1702,11 @@ csv.register_dialect("letterboxd", delimiter=",", lineterminator="\n", quoting=c
 class LetterBoxd:
     def __init__(self, base: BaseInterface, category_name: str, zip_archive_path: str):
         self.base = base
+        self.positions: dict[int, int] = {}
         self.category = self._get_category(category_name)
         if self.category is None:
             show_error("Could not create category or category with name isn't suitable for updates")
             return
-        self.positions: dict[int, int] = self._get_col_positions()
         self.base_row: list[Any] = self.category.get_default_row()
         try:
             self.data = self._get_data(zip_archive_path)
@@ -1632,22 +1721,24 @@ class LetterBoxd:
             if category.has_column_definition(["NAME", "TITLE"], TableTypes.STRING) and \
                 category.has_column_definition(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0) and \
                 category.has_column_definition("WATCHED", TableTypes.BOOLEAN):
+                self.positions = self._get_col_positions()
                 return category
             return None
         category = Category()
         category.display_name = category_name
         category.db_name = db_name(category_name)
         category.columns = [CategoryColumn("Date", "Date", False,
-                                      TableTypes.STRING, 0, False, False),
+                                      TableTypes.STRING, 0, False, False), # 1
                        CategoryColumn("Name", "Name", True,
-                                      TableTypes.STRING, 0, False, False),
+                                      TableTypes.STRING, 0, False, False), # 2
                        CategoryColumn("Year", "Year", True,
-                                      TableTypes.INTEGER, 0, False, False),
+                                      TableTypes.INTEGER, 0, False, False), # 3
                        CategoryColumn("Letterboxd_URI", "Letterboxd URI", False,
-                                      TableTypes.STRING, 0, False, True),
+                                      TableTypes.STRING, 0, False, True), # 4
                        CategoryColumn("Watched", "Watched", False,
-                                      TableTypes.BOOLEAN, 0, False, True),
+                                      TableTypes.BOOLEAN, 0, False, True), # 5
                        ]
+        self.positions = {i: i for i in range(len(category.columns))}
         if not category.add_category():
             return None
         self.base.add_category(category)
