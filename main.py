@@ -1577,7 +1577,7 @@ class MyAnimeList:
                                                    TableTypes.STRING) and \
                     category.has_column_definition("EPISODES", TableTypes.INTEGER, 0) and \
                     category.has_column_definition(["EPISODES WATCHED", "WATCHED EPISODES"], TableTypes.INTEGER, 0):
-                self.positions = self._get_col_positions()
+                self.positions = self._get_col_positions(category)
                 return category
             return None
         category = Category()
@@ -1628,16 +1628,29 @@ class MyAnimeList:
         self.base.add_category(category)
         return category
 
-    def _get_col_positions(self) -> dict[int, int]:
+    @staticmethod
+    def _get_col_positions(category: Category) -> dict[int, int]:
         result = {
-            0: self.category.column_position(["ANIMEDB ID", "ANIMEDB", "ANIMEDBID", "ANIMEID", "ANIME ID"],
-                                             TableTypes.STRING),
-            1: self.category.column_position(["SERIES TITLE", "SERIES", "TITLE"], TableTypes.STRING),
-            # Todo finish this
-            2: self.category.column_position(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0),
-            3: self.category.column_position(["LETTERBOXD URI", "LETTERBOXD URL", "LETTERBOXD"],
-                                             TableTypes.STRING),
-            4: self.category.column_position("WATCHED", TableTypes.BOOLEAN),
+            0: category.column_position(["ANIMEDB ID", "ANIMEDB", "ANIMEDBID", "ANIMEID", "ANIME ID"],
+                                           TableTypes.STRING),
+            1: category.column_position(["SERIES TITLE", "SERIES", "TITLE"], TableTypes.STRING),
+            2: category.column_position("Type", TableTypes.STRING),
+            3: category.column_position("EPISODES", TableTypes.INTEGER, 0),
+            4: category.column_position(["My ID", "ID"], TableTypes.STRING),
+            5: category.column_position(["EPISODES WATCHED", "WATCHED EPISODES"], TableTypes.INTEGER, 0),
+            6: category.column_position("Start Date", TableTypes.STRING),
+            7: category.column_position("Finish Date", TableTypes.STRING),
+            8: category.column_position(["My Rating", "Rating"], TableTypes.STRING),
+            9: category.column_position(["My Score", "Score"], TableTypes.STRING),
+            10: category.column_position("DVD", TableTypes.STRING),
+            11: category.column_position(["My Storage", "Storage"], TableTypes.STRING),
+            12: category.column_position("Status", TableTypes.STRING),
+            13: category.column_position("Comment", TableTypes.STRING),
+            14: category.column_position("Times Watched", TableTypes.INTEGER, 0),
+            15: category.column_position("Rewatch Value", TableTypes.STRING),
+            16: category.column_position("Tags", TableTypes.STRING),
+            17: category.column_position("Rewatching", TableTypes.BOOLEAN),
+            18: category.column_position("Episodes Rewatching", TableTypes.INTEGER, 0),
         }
         for key, value in result.items():
             if value == -1:
@@ -1722,7 +1735,7 @@ class LetterBoxd:
             if category.has_column_definition(["NAME", "TITLE"], TableTypes.STRING) and \
                 category.has_column_definition(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0) and \
                 category.has_column_definition("WATCHED", TableTypes.BOOLEAN):
-                self.positions = self._get_col_positions()
+                self.positions = self._get_col_positions(category)
                 return category
             return None
         category = Category()
@@ -1745,14 +1758,15 @@ class LetterBoxd:
         self.base.add_category(category)
         return category
 
-    def _get_col_positions(self) -> dict[int, int]:
+    @staticmethod
+    def _get_col_positions(category: Category) -> dict[int, int]:
         result = {
-            0: self.category.column_position("DATE", TableTypes.STRING),
-            1: self.category.column_position(["NAME", "TITLE"], TableTypes.STRING),
-            2: self.category.column_position(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0),
-            3: self.category.column_position(["LETTERBOXD URI", "LETTERBOXD URL", "LETTERBOXD"],
+            0: category.column_position("DATE", TableTypes.STRING),
+            1: category.column_position(["NAME", "TITLE"], TableTypes.STRING),
+            2: category.column_position(["YEAR", "RELEASE YEAR"], TableTypes.INTEGER, 0),
+            3: category.column_position(["LETTERBOXD URI", "LETTERBOXD URL", "LETTERBOXD"],
                                              TableTypes.STRING),
-            4: self.category.column_position("WATCHED", TableTypes.BOOLEAN),
+            4: category.column_position("WATCHED", TableTypes.BOOLEAN),
         }
         for key, value in result.items():
             if value == -1:
