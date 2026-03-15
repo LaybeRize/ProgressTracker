@@ -1033,7 +1033,7 @@ class CategoryEditor:
     def delete_category(self):
         if not self.last_category.delete_me():
             return
-        self.base.categories.pop(self.last_category_pos)
+        self.base.delete_group(self.last_category_pos)
         self.last_category = None
         self.create_and_query()
         show_info("Category successfully deleted")
@@ -1382,6 +1382,7 @@ class BaseInterface:
         self.refresh_layout()
 
     def delete_group(self, group_pos: int):
+        self.groups[group_pos].pack_forget()
         self.groups[group_pos].destroy()
         self.groups.pop(group_pos)
         self.refresh_layout()
