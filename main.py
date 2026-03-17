@@ -13,6 +13,7 @@ import tkinter.font as tk_font
 import tkinter.messagebox
 from typing import Final, Callable, Any
 from tkinter.scrolledtext import ScrolledText as TKScrollText
+from tkinter.filedialog import askopenfilename
 from functools import partial
 
 #------------------------------------
@@ -473,7 +474,7 @@ class Category:
         col_names = ", ".join(self.db_column_names)
         question_marks = ", ".join(["?"] * len(self.db_column_names))
         primary_keys = ", ".join(self.db_primary_columns)
-        values = values, values + [values[i] for i in self.primary_key_pos]
+        values = values + values + [values[i] for i in self.primary_key_pos]
         command = f"INSERT INTO {self.db_name} ({col_names}) VALUES ({question_marks}) ON CONFLICT" + \
                   f"({primary_keys}) DO UPDATE SET {self.__base_full_update} WHERE {self.__primary_key_statement};"
         cur = open_cursor()
@@ -1329,6 +1330,60 @@ class TableView:
         self.query_result[row] = col_copy
 
 
+class DataImporter:
+    def __init__(self, base: BaseInterface):
+        self.base = base
+        base.hide()
+
+        self.__LETTERBOXD: Final[str] = "Letterboxd"
+        self.__ANILIST: Final[str] = "MyAnimeList (Anime)"
+        self.options = [self.__LETTERBOXD, self.__ANILIST]
+
+        self.master = Toplevel()
+        self.master.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.master.title("Import Data")
+        self.master.minsize(550, 400)
+        self.master.focus_force()
+
+        self.option_string = StringVar(self.master, self.options[0])
+        self.table_name = StringVar(self.master)
+        self.file_path = StringVar(self.master)
+        self.selectable_option = OptionMenu(self.master, self.option_string, *self.options)
+
+        Label(self.master, text="Table Name:").grid(column=0, row=0, padx=5, sticky=W)
+        Label(self.master, text="File Path:").grid(column=0, row=1, padx=5, sticky=W)
+        Label(self.master, text="Format:").grid(column=0, row=2, padx=5, sticky=W)
+
+        Entry(self.master, textvariable=self.table_name, width=25).grid(column=1, row=0, pady=5)
+        Entry(self.master, textvariable=self.file_path, width=25).grid(column=1, row=1, pady=5)
+        self.selectable_option.grid(column=1, row=2, pady=5, sticky=W)
+
+        Button(self.master, text="Import Data", command=self.execute).grid(column=0, row=3, pady=5, sticky=W)
+        Button(self.master, text="Choose a file", command=self.set_path).grid(column=2, row=1, padx=5)
+
+    def destroy(self):
+        self.base.show()
+        self.master.destroy()
+
+    def set_path(self):
+        self.file_path.set(askopenfilename())
+
+    def execute(self):
+        success = False
+        match self.option_string.get():
+            case self.__LETTERBOXD:
+                temp = LetterBoxd(self.base, self.table_name.get().strip(), self.file_path.get())
+                success = temp.success
+            case self.__ANILIST:
+                temp = MyAnimeList(self.base, self.table_name.get().strip(), self.file_path.get())
+                success = temp.success
+
+        if success:
+            self.table_name.set("")
+            self.file_path.set("")
+            show_info("Import successful")
+
+
 class BaseInterface:
     def __init__(self):
         self.master = Tk()
@@ -1402,8 +1457,10 @@ class BaseInterface:
             .grid(row=0, column=0, padx=(5,0), pady=5)
         Button(category_info, text='Create HTML for all', command=lambda: HTMLGenerator(self)) \
             .grid(row=0, column=1, padx=5)
-        Button(category_info, text='Save to DB', command=lambda: update_disk_db(False)) \
+        Button(category_info, text='Import Data', command=lambda: DataImporter(self)) \
             .grid(row=0, column=2)
+        Button(category_info, text='Save to DB', command=lambda: update_disk_db(False)) \
+            .grid(row=0, column=3 ,padx=5)
         self.outer.pack(fill="both", expand=True)
 
     @staticmethod
@@ -1555,6 +1612,7 @@ class HTMLGenerator:
 class MyAnimeList:
     def __init__(self, base: BaseInterface, category_name: str, file_path: str):
         self.base = base
+        self.success = False
         self.positions: dict[int, int] = {}
         self.category = self._get_category(category_name)
         if self.category is None:
@@ -1566,7 +1624,7 @@ class MyAnimeList:
         except Exception as err:
             show_error(f"Could not extract valid data from the given ZIP archive:\n{err}")
             return
-        self._upsert_data()
+        self.success = self._upsert_data()
 
     def _get_category(self, category_name: str) -> Category | None:
         category = self.base.get_category(category_name)
@@ -1702,12 +1760,13 @@ class MyAnimeList:
             anime_list.append(entry)
         return anime_list
 
-    def _upsert_data(self):
+    def _upsert_data(self) -> bool:
         for row in self.data:
-            for key, value in self.positions:
+            for key, value in self.positions.items():
                 self.base_row[value] = row[key]
             if not self.category.upsert_entry(self.base_row):
-                return
+                return False
+        return True
 
 
 csv.register_dialect("letterboxd", delimiter=",", lineterminator="\n", quoting=csv.QUOTE_MINIMAL, strict=True)
@@ -1716,6 +1775,7 @@ csv.register_dialect("letterboxd", delimiter=",", lineterminator="\n", quoting=c
 class LetterBoxd:
     def __init__(self, base: BaseInterface, category_name: str, zip_archive_path: str):
         self.base = base
+        self.success = False
         self.positions: dict[int, int] = {}
         self.category = self._get_category(category_name)
         if self.category is None:
@@ -1727,7 +1787,7 @@ class LetterBoxd:
         except Exception as err:
             show_error(f"Could not extract valid data from the given ZIP archive:\n{err}")
             return
-        self._upsert_data()
+        self.success = self._upsert_data()
 
     def _get_category(self, category_name: str) -> Category | None:
         category = self.base.get_category(category_name)
@@ -1802,12 +1862,13 @@ class LetterBoxd:
 
         return [[date, name, int(year), uri, watch] for (date, name, year, uri, watch) in zip(*result, strict=True)]
 
-    def _upsert_data(self):
+    def _upsert_data(self) -> bool:
         for row in self.data:
-            for key, value in self.positions:
+            for key, value in self.positions.items():
                 self.base_row[value] = row[key]
             if not self.category.upsert_entry(self.base_row):
-                return
+                return False
+        return True
 
 
 # ------------------------------------
