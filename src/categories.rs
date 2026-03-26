@@ -1019,9 +1019,17 @@ mod tests {
         test_database_load_categories(movies.clone());
         test_database_inserts(movies.clone(), manipulation_row);
         test_database_queries(movies.clone());
-        test_database_manipulation(movies, manipulation_row);
+        test_database_manipulation(movies.clone(), manipulation_row);
+        test_database_full_row_manipulation(movies.clone());
+        test_database_delete_row(movies.clone(), manipulation_row);
+        test_database_upsert(movies.clone());
+        test_database_query_all(movies.clone());
+
+        // testing update_meta() doesn't make any sense without the transform of the table data itself too
 
         assert_eq!(save_db_to_disk(path), Ok(()));
+
+        test_database_delete_category(movies.clone());
     }
 
 
@@ -1063,7 +1071,7 @@ mod tests {
         assert_eq!(movies.insert_row(double_entry),
                    Err(SqliteFailure(
                        Error{code: ConstraintViolation, extended_code: 1555},
-                       Some("UNIQUE constraint failed: Movies.Title, Movies.Year".parse().unwrap())
+                       Some("UNIQUE constraint failed: Movies.Title, Movies.Year".into())
                    )));
     }
 
@@ -1098,6 +1106,100 @@ mod tests {
     fn test_database_manipulation(movies: Category, old_row: &mut[CellValue]) {
         assert_eq!(movies.update_cell(old_row, CellValue::Boolean(false), 2), Ok(()));
         old_row[2] = CellValue::Boolean(false);
+
+        let (rows, _) = movies.query_page(0, 10, None).expect("Query for manipulation check failed");
+
+        assert_eq!(old_row, rows[1]);
+    }
+
+    fn test_database_full_row_manipulation(movies: Category) {
+        let row_before = &[
+            CellValue::Text("The best in the world".into()),
+            CellValue::Integer(Some(2012)),
+            CellValue::Boolean(true),
+            CellValue::Integer(Some(85)),
+            CellValue::Text("No comment".into()),
+        ];
+        let new_row = vec![
+            CellValue::Text("Zhe best Film".into()),
+            CellValue::Integer(Some(1912)),
+            CellValue::Boolean(false),
+            CellValue::Integer(Some(35)),
+            CellValue::Text("Some comment lol".into()),
+        ];
+
+        movies.insert_row(row_before).expect("Insert for full row manipulation failed.");
+        movies.update_row(row_before, &new_row).expect("Failed to manipulate full row");
+
+        let (rows, _) = movies.query_page(0, 10, None).expect("Query for manipulation check failed");
+
+        assert_eq!(new_row, rows[2]);
+    }
+
+    fn test_database_delete_row(movies: Category, old_row: &mut[CellValue]) {
+        assert_eq!(movies.delete_row(old_row), Ok(()));
+        assert_eq!(movies.delete_row(old_row), Ok(())); // forgot that this shouldn't fail
+    }
+
+    fn test_database_upsert(movies: Category) {
+        let row_before = &[
+            CellValue::Text("Bazinga".into()),
+            CellValue::Integer(Some(2012)),
+            CellValue::Boolean(true),
+            CellValue::Integer(Some(85)),
+            CellValue::Text("No comment".into()),
+        ];
+        let new_row = vec![
+            CellValue::Text("Bazinga".into()),
+            CellValue::Integer(Some(2012)),
+            CellValue::Boolean(false),
+            CellValue::Integer(Some(35)),
+            CellValue::Text("Some comment lol".into()),
+        ];
+        assert_eq!(movies.upsert_row(row_before), Ok(()));
+        assert_eq!(movies.upsert_row(&new_row), Ok(()));
+
+        let base: String = "".into();
+        let (rows, _) = movies.query_page(0, 10,
+                                          Some(&["Bazinga".into(), "2012".into(), base.clone(), base.clone(), base.clone()])
+                                                            ).expect("Query for manipulation check failed");
+
+        assert_eq!(new_row, rows[0]);
+        let single_row = movies.load_row(&new_row).expect("Failed to query specific entry").expect("Failed to find specific entry");
+        assert_eq!(new_row, single_row);
+    }
+
+    fn test_database_query_all(movies: Category) {
+        let rows = movies.query_all().expect("Could not query all rows");
+        assert_eq!(rows.len(), 3);
+    }
+
+    fn test_database_delete_category(movies: Category) {
+        assert_eq!(movies.delete(), Ok(()));
+    }
+
+    #[test]
+    fn test_columns() {
+        let cat_1 = CategoryColumn::new("Rating", "Rating", false, ColumnType::Integer, 1, false, false);
+        let movies = Category::new(
+            "Movies",
+            vec![
+                CategoryColumn::new("Title", "Title", true, ColumnType::Text, 0, false, false),
+                CategoryColumn::new("Year", "Year", true, ColumnType::Integer, 0, false, false),
+                CategoryColumn::new("Watched", "Watched", false, ColumnType::Boolean, 0, false, false),
+                cat_1.clone(),
+                CategoryColumn::new("Notes", "Notes", false, ColumnType::Text, 0, false, true),
+            ],
+        );
+        assert_eq!(movies.has_column(&[&cat_1.display_name], &cat_1.col_type, Some(cat_1.decimal_digits)), true);
+        assert_eq!(movies.column_position(&[&cat_1.display_name], &cat_1.col_type, Some(cat_1.decimal_digits)), Some(3));
+        assert_eq!(movies.default_row(), &[
+            CellValue::Text("".into()),
+            CellValue::Integer(None),
+            CellValue::Boolean(false),
+            CellValue::Integer(None),
+            CellValue::Text("".into()),
+        ]);
     }
 
     #[test]
