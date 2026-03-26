@@ -1,6 +1,8 @@
-data.sqlite
+/target
 .idea
-test.py
-venv
-tmp
+data.sqlite
+test.sqlite
 data.html
+/images
+CLAUDE.md
+documentation.md

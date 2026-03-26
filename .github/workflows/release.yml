@@ -1,0 +1,118 @@
+# .github/workflows/release.yml
+#
+# Builds your Rust project natively on Windows, macOS, and Linux,
+# then attaches the binaries to a GitHub Release automatically.
+#
+# HOW TO TRIGGER:
+#   git tag v1.0.0
+#   git push --tags
+#
+# The binaries will appear under the release on your GitHub repo page.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"          # runs on any tag starting with v (v1.0.0, v2.3.1, etc.)
+
+# Change this to your actual binary name (what's in [package] name in Cargo.toml)
+env:
+  BINARY_NAME: ProgressTracker
+
+jobs:
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      # fail-fast: false means all three platforms attempt to build even if one fails.
+      # This is useful so you can see all errors at once rather than stopping early.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: myapp-linux-x86_64
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: myapp-windows-x86_64.exe
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: myapp-macos-x86_64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache compiled dependencies so repeat builds are much faster.
+      # On a cold build this saves nothing; on subsequent builds it can
+      # cut build time from ~5 minutes to under a minute.
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # The binary lives at a slightly different path on each platform,
+      # so we copy it to a predictable name before uploading.
+      - name: Rename binary (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} \
+             ${{ matrix.artifact_name }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe `
+             ${{ matrix.artifact_name }}
+
+      # Upload as a build artifact first (visible in the Actions tab)
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+          retention-days: 7
+
+  # Separate job that runs after all three builds succeed.
+  # Creates a GitHub Release and attaches all three binaries.
+  release:
+    name: Create GitHub Release
+    needs: build           # only runs if all build jobs passed
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write      # needed to create releases and upload assets
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/   # downloads all artifacts into this folder
+
+      - name: Create release and upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          # The release name will be the tag, e.g. "v1.0.0"
+          name: Release ${{ github.ref_name }}
+          # Set draft: true if you want to review the release before publishing
+          draft: false
+          prerelease: false
+          files: artifacts/**/*

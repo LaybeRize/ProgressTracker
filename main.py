@@ -4,9 +4,10 @@ import atexit
 import csv
 import html
 import io
+import json
 import re
 import sqlite3
-import xml
+import xml.etree.ElementTree as ElTree
 import zipfile
 from tkinter import *
 import tkinter.font as tk_font
@@ -40,6 +41,7 @@ def format_number_trim(value: int | None, decimal_digits: int) -> str:
     base_string = base_string.rstrip("0")
     return base_string.rstrip(".")
 
+
 def format_string_to_number(value: str, decimal_digits: int) -> int | None:
     value = value.strip()
     general_format = re.compile(r"^[0-9]+(\.[0-9]*)?$", flags=re.MULTILINE | re.UNICODE)
@@ -57,8 +59,6 @@ def format_string_to_number(value: str, decimal_digits: int) -> int | None:
             return int(m.removesuffix(".")) * (10 ** decimal_digits)
     else:
         return None
-
-
 
 
 #------------------------------------
@@ -83,12 +83,14 @@ database_on_disk = sqlite3.connect("./data.sqlite", detect_types=sqlite3.PARSE_D
 with database_on_disk:
     database_on_disk.backup(con)
 
+
 def update_disk_db(close: bool = True):
     with con:
         con.backup(database_on_disk)
     if close:
         con.close()
         database_on_disk.close()
+
 
 atexit.register(update_disk_db)
 
@@ -197,7 +199,6 @@ class CategoryColumn:
         return ""
 
 
-
 class Category:
     def __init__(self):
         self.id: int = -1
@@ -239,9 +240,9 @@ class Category:
 
     def _transform_text(self) -> bool:
         if len(self.columns) == 0:
-            self.columns, update = CategoryColumn.load_columns_from_dict(eval(self.column_text))
+            self.columns, update = CategoryColumn.load_columns_from_dict(json.loads(self.column_text))
         else:
-            self.column_text = str(CategoryColumn.transform_columns_to_dict(self.columns))
+            self.column_text = json.dumps(CategoryColumn.transform_columns_to_dict(self.columns))
             update = False
 
         # helpful values that might be used internally or externally
@@ -270,7 +271,7 @@ class Category:
 
     def column_position(self, disp_name: str | list[str], col_type: str,
                               decimal_digits: int | None = None) -> int:
-        if type(disp_name) is list:
+        if isinstance(disp_name, list):
             disp_names = [e.upper() for e in disp_name]
         else:
             disp_names = [disp_name.upper()]
@@ -400,7 +401,7 @@ class Category:
             return False
         return None
 
-    def delete_me(self) -> bool:
+    def delete(self) -> bool:
         cur = open_cursor()
         try:
             cur.execute("DELETE FROM master WHERE ID = ?;",
@@ -596,6 +597,7 @@ def show_error(msg: str):
 
 def show_info(msg: str):
     tkinter.messagebox.showinfo("Info", msg)
+
 
 class SelectableLabel(Frame):
     def __init__(self, parent, text="", **kwargs):
@@ -1032,7 +1034,7 @@ class CategoryEditor:
         show_info("Category successfully updated")
 
     def delete_category(self):
-        if not self.last_category.delete_me():
+        if not self.last_category.delete():
             return
         self.base.delete_group(self.last_category_pos)
         self.last_category = None
@@ -1160,7 +1162,7 @@ class EntryManipulator:
 
     def query_entries(self, lock_fields: bool = False):
         values = [e.get() for e in self.var_elements]
-        values = [e if type(e) is not str else e.strip() for e in values]
+        values = [e if not isinstance(e, str) else e.strip() for e in values]
         result = self.category.load_entry(values)
         if result is None:
             show_info("Could not find an entry with the given key")
@@ -1176,7 +1178,7 @@ class EntryManipulator:
 
     def modify_entry(self):
         values = [e.get() for e in self.var_elements]
-        values = [e if type(e) is not str else e.strip() for e in values]
+        values = [e if not isinstance(e, str) else e.strip() for e in values]
         if not self.category.do_full_update(self.queried_entry, values):
             return
         self.btn_one.configure(state="active")
@@ -1212,7 +1214,7 @@ class EntryManipulator:
 
     def add_to_db(self):
         values = [e.get() for e in self.var_elements]
-        values = [e if type(e) is not str else e.strip() for e in values]
+        values = [e if not isinstance(e, str) else e.strip() for e in values]
         if not self.category.add_entry(values):
             return
         if self.keep_entries.get():
@@ -1478,6 +1480,7 @@ class BaseInterface:
 # HTML Class Interactions and Variables
 # ------------------------------------
 
+
 CSS = '''
 .data-table {
   margin: 0 auto;
@@ -1535,6 +1538,7 @@ a {
   margin: 0.3em;
 }
 '''
+
 
 class HTMLGenerator:
     def __init__(self, base: BaseInterface, category: Category = None):
@@ -1710,9 +1714,7 @@ class MyAnimeList:
             17: category.column_position("Rewatching", TableTypes.BOOLEAN),
             18: category.column_position("Episodes Rewatching", TableTypes.INTEGER, 0),
         }
-        for key, value in result.items():
-            if value == -1:
-                result.pop(key)
+        result = {k: v for k, v in result.items() if v != -1}
         return result
 
     @staticmethod
@@ -1750,7 +1752,7 @@ class MyAnimeList:
         anime_list: list[list[str]] = []
         base_empty = [func("") for _, func in row_position.values()]
 
-        root = xml.etree.ElementTree.parse(file_path)
+        root = ElTree.parse(file_path)
         for anime in root.findall("anime"):
             entry = base_empty.copy()
             for child in anime:
@@ -1828,9 +1830,7 @@ class LetterBoxd:
                                              TableTypes.STRING),
             4: category.column_position("WATCHED", TableTypes.BOOLEAN),
         }
-        for key, value in result.items():
-            if value == -1:
-                result.pop(key)
+        result = {k: v for k, v in result.items() if v != -1}
         return result
 
     @staticmethod
@@ -1878,6 +1878,7 @@ class LetterBoxd:
 
 def main():
     BaseInterface()
+
 
 if __name__ == '__main__':
     main()

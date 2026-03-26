@@ -1,0 +1,145 @@
+# .gitlab-ci.yml
+#
+# Builds your Rust project natively on Windows, macOS, and Linux,
+# then attaches the binaries to a GitLab Release automatically.
+#
+# HOW TO TRIGGER:
+#   git tag v1.0.0
+#   git push --tags
+#
+# NOTE ON RUNNERS:
+#   - Linux:   uses GitLab's shared runners (free, always available)
+#   - Windows: uses GitLab's shared runners (available on gitlab.com)
+#   - macOS:   GitLab's shared macOS runners require a paid plan on gitlab.com.
+#              If you self-host GitLab, register your own macOS runner instead.
+#              See: https://docs.gitlab.com/runner/install/osx.html
+#
+# NOTE ON FREE MINUTES:
+#   gitlab.com gives 400 free CI minutes/month for private repos.
+#   Public repos are unlimited. Self-hosted GitLab has no minute limits.
+
+# Change this to your actual binary name (what's in [package] name in Cargo.toml)
+variables:
+  BINARY_NAME: ProgressTracker
+
+# Only run this pipeline when a version tag is pushed
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v.*/
+
+stages:
+  - build
+  - release
+
+# ─── BUILD JOBS ───────────────────────────────────────────────────────────────
+
+# Shared config that all three build jobs inherit.
+# GitLab calls this an "anchor" — it's YAML's built-in inheritance mechanism.
+.build_common: &build_common
+  stage: build
+  # Store the compiled binary as a GitLab artifact so the release job can
+  # download it. GitLab artifacts are equivalent to GitHub's upload-artifact.
+  artifacts:
+    paths:
+      - artifacts/
+    expire_in: 7 days
+
+build-linux:
+  <<: *build_common
+  image: rust:latest        # official Rust Docker image, runs on Linux shared runner
+  tags:
+    - saas-linux-small-amd64
+  before_script:
+    - rustup target add x86_64-unknown-linux-gnu
+    # Cache the cargo registry between runs to speed up builds.
+    # GitLab caches are keyed by branch/tag so they're shared across pipelines.
+  cache:
+    key: linux-cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  script:
+    - cargo build --release --target x86_64-unknown-linux-gnu
+    - mkdir -p artifacts
+    - cp target/x86_64-unknown-linux-gnu/release/$BINARY_NAME
+      artifacts/${BINARY_NAME}-linux-x86_64
+
+build-windows:
+  <<: *build_common
+  tags:
+    - saas-windows-medium-amd64    # GitLab's shared Windows runner tag
+  before_script:
+    - rustup target add x86_64-pc-windows-msvc
+  cache:
+    key: windows-cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  script:
+    - cargo build --release --target x86_64-pc-windows-msvc
+    - New-Item -ItemType Directory -Force -Path artifacts
+    - Copy-Item "target\x86_64-pc-windows-msvc\release\$env:BINARY_NAME.exe"
+      "artifacts\$($env:BINARY_NAME)-windows-x86_64.exe"
+
+build-macos:
+  <<: *build_common
+  tags:
+    - saas-macos-medium-m1         # GitLab's shared macOS runner (paid tier on gitlab.com)
+  before_script:
+    - rustup target add x86_64-apple-darwin
+  cache:
+    key: macos-cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  script:
+    - cargo build --release --target x86_64-apple-darwin
+    - mkdir -p artifacts
+    - cp target/x86_64-apple-darwin/release/$BINARY_NAME
+      artifacts/${BINARY_NAME}-macos-x86_64
+
+# ─── RELEASE JOB ──────────────────────────────────────────────────────────────
+#
+# Runs after all three build jobs succeed and creates a GitLab Release with
+# all three binaries attached. Equivalent to the softprops/action-gh-release
+# step in the GitHub workflow.
+
+create-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build-linux
+      artifacts: true
+    - job: build-windows
+      artifacts: true
+    - job: build-macos
+      artifacts: true
+  script:
+    # Upload each binary as a generic package so release-cli can link to them.
+    # GitLab Releases link to URLs rather than attaching files directly —
+    # the Package Registry is the standard place to host them.
+    - |
+      for FILE in artifacts/*; do
+        NAME=$(basename $FILE)
+        curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+             --upload-file "$FILE" \
+             "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${NAME}"
+      done
+  release:
+    name: "Release $CI_COMMIT_TAG"
+    tag_name: $CI_COMMIT_TAG
+    description: "Automated release for $CI_COMMIT_TAG"
+    assets:
+      links:
+        - name: "${BINARY_NAME}-linux-x86_64"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-x86_64"
+          link_type: package
+        - name: "${BINARY_NAME}-windows-x86_64.exe"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}-windows-x86_64.exe"
+          link_type: package
+        - name: "${BINARY_NAME}-macos-x86_64"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}-macos-x86_64"
+          link_type: package
