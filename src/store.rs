@@ -13,7 +13,7 @@ pub trait DataAccess {
 
     fn save_category(&self, name: &str, cols: &[CategoryColumn]) -> RequestResult<(String, i64)>;
 
-    fn delete_category(&self, id: i64, name: String) -> RequestResult<()>;
+    fn delete_category(&self, cat: Category) -> RequestResult<()>;
 
     fn load_entries(&self, cat: &Category, amount: u32, offset: u32, filters: &[SearchValue]) -> RequestResult<(Vec<Vec<CellValue>>, bool)>;
 

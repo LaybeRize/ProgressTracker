@@ -215,7 +215,7 @@ impl Category {
     }
 
     pub fn delete(self, conn: &impl DataAccess) -> Result<()> {
-        conn.delete_category(self.id, self.internal_name)
+        conn.delete_category(self)
     }
 
     pub fn insert_entry(&self, conn: &impl DataAccess, row: &[CellValue]) -> Result<()> {
@@ -240,6 +240,13 @@ impl Category {
                 let filters: Vec<SearchValue> = self.columns.iter().zip(s.iter()).map(|(col, raw)| col.parse_search(raw)).collect();
                 conn.load_entries(self, amount, offset, &filters)
             }
+        }
+    }
+
+    pub fn load_entries_for_display(&self, conn: &impl DataAccess, amount: u32, offset: u32, filters: Option<&[String]>) -> Result<(Vec<Vec<String>>, bool)> {
+        match self.load_entries(conn, amount, offset, filters) {
+            Ok((res, next)) => {Ok((self.rows_to_display(&res), next))}
+            Err(err) => {Err(err)}
         }
     }
 

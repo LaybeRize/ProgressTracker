@@ -230,11 +230,11 @@ impl DataAccess for SqliteDataAccess {
         Ok((db_name, id))
     }
 
-    fn delete_category(&self, id: i64, db_name: String) -> RequestResult<()> {
+    fn delete_category(&self, cat: Category) -> RequestResult<()> {
         let mut db = self.conn.lock().unwrap();
         let conn = db.transaction()?;
-        conn.execute("DELETE FROM master WHERE ID = ?1", params![id])?;
-        conn.execute_batch(&format!("DROP TABLE {};", db_name))?;
+        conn.execute("DELETE FROM master WHERE ID = ?1", params![cat.id])?;
+        conn.execute_batch(&format!("DROP TABLE {};", cat.internal_name))?;
         conn.commit()?;
         Ok(())
     }
